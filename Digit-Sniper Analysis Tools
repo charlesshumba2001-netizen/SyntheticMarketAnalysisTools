@@ -1,0 +1,2320 @@
+/*
+ * Welcome to my [DIGIT]-Sniper TOOL.
+ * The goal here is to build a powerful Analysis TOOL that assists
+ * traders to make data-driven decisions and profit on a daily from the
+ * Binary Space !!!
+ */
+
+using Newtonsoft.Json.Linq;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Net.WebSockets;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace _DIGIT__Sniper_TOOL
+{
+    #region--- [CLASSES] ---
+
+    public class DigitAnalysisResult_Manual
+    {
+        // Size of the rolling window used
+        public int WindowSize { get; set; }
+
+        // Probability distribution of each digit 0-9
+        public double[] Probabilities { get; set; }
+
+        // Outcome probabilities of each digit 0-9 (This could be used for specific outcomes based on trader setup)
+        public double[] OutcomeProbabilities { get; set; }
+
+        // Conditional probability that trader’s setup will win (OVER/UNDER/DIFFERS/etc)
+        public double TraderProbability { get; set; } = 0.0;
+    }
+    public class DigitAnalysisResult_Samples
+    {
+        // Size of the rolling window used
+        public int WindowSize { get; set; }
+
+        // Probability distribution of each digit 0-9
+        public double[] Probabilities { get; set; }
+
+        // Conditional probability that trader’s setup will win (OVER/UNDER/DIFFERS/etc)
+        public double TraderProbability { get; set; } = 0.0;
+    }
+
+    #endregion--- [CLASSES] ---
+
+    internal class Program
+    {
+        #region ---CORE startup variables---
+
+        // 🔹 User settings
+        private static string selectedMarket;
+        private static string selectedType;
+        private static int selectedDigit;
+
+        //Rolling Window Variables
+        private static Queue<int> rollingDigits = new Queue<int>();
+        private static Queue<int> rollingSamples = new Queue<int>();
+
+        private static int? previousDigit = null;
+        private static int? previousSample = null;
+
+        // Tracks current streak length of consecutive successful digits
+        private static int currentSampleLength = 0;
+
+        private static int rollingWindowSize = 100;//FIXED LAST [N]-Digits
+
+        private static DigitAnalysisResult_Manual lastAnalysis_Manual;
+        private static DigitAnalysisResult_Samples lastAnalysis_Samples;
+
+        // Tracks Consecutive Success Digits
+        private static bool IsSuccess(int digit)
+        {
+            if (string.IsNullOrEmpty(selectedType))
+                return false;
+
+            switch (selectedType.ToUpper())
+            {
+                case "UNDER":
+                    return digit < selectedDigit;
+
+                case "OVER":
+                    return digit > selectedDigit;
+
+                case "MATCHES":
+                    return digit == selectedDigit;
+
+                case "DIFFERS":
+                    return digit != selectedDigit;
+
+                case "EVEN":
+                    return digit % 2 == 0;
+
+                case "ODD":
+                    return digit % 2 == 1;
+
+                default:
+                    return false;
+            }
+        }
+
+        #endregion ---CORE startup variables---
+
+        #region ---[Market]-Information---
+
+        // Market display names
+        private static readonly Dictionary<string, string> marketNames = new Dictionary<string, string>
+        {
+            { "1HZ10V", "VOLATILITY 10 (1s) Index" },
+            { "R_10", "VOLATILITY 10 Index" },
+            { "1HZ15V", "VOLATILITY 15 (1s) Index" },
+            { "1HZ25V", "VOLATILITY 25 (1s) Index" },
+            { "R_25", "VOLATILITY 25 Index" },
+            { "1HZ30V", "VOLATILITY 30 (1s) Index" },
+            { "1HZ50V", "VOLATILITY 50 (1s) Index" },
+            { "R_50", "VOLATILITY 50 Index" },
+            { "1HZ75V", "VOLATILITY 75 (1s) Index" },
+            { "R_75", "VOLATILITY 75 Index" },
+            { "1HZ90V", "VOLATILITY 90 (1s) Index" },
+            { "1HZ100V", "VOLATILITY 100 (1s) Index" },
+            { "R_100", "VOLATILITY 100 Index" },
+            { "JD10", "JUMP 10 Index" },
+            { "JD25", "JUMP 25 Index" },
+            { "JD50", "JUMP 50 Index" },
+            { "JD75", "JUMP 75 Index" },
+            { "JD100", "JUMP 100 Index" },
+            { "RDBULL", "BULL Market" },
+            { "RDBEAR", "BEAR Market" }
+        };
+
+        // Decimal places per market
+        private static readonly Dictionary<string, int> marketDecimalPlaces = new Dictionary<string, int>
+        {
+            { "1HZ10V", 2 },
+            { "R_10", 3 },
+            { "1HZ15V", 3 },
+            { "1HZ25V", 2 },
+            { "R_25", 3 },
+            { "1HZ30V", 3 },
+            { "1HZ50V", 2 },
+            { "R_50", 4 },
+            { "1HZ75V", 2 },
+            { "R_75", 4 },
+            { "1HZ90V", 3 },
+            { "1HZ100V", 2 },
+            { "JD10", 2 },
+            { "JD25", 2 },
+            { "JD50", 2 },
+            { "JD75", 2 },
+            { "JD100", 2 },
+            { "RDBULL", 4 },
+            { "RDBEAR", 4 },
+        };
+
+        // Hardcoded edge variable to store thresholds for any type/digit
+        private static readonly Dictionary<string, double> HardcodedEdgeThresholds = new Dictionary<string, double>()
+        {
+            // Format: "TYPE-DIGIT" -> minimum confidence to consider as edge
+            { "OVER-0", 0.95 },
+            { "OVER-1", 0.90 },
+            { "OVER-2", 0.80 },
+            { "OVER-3", 0.70 },
+            { "OVER-4", 0.60 },
+            { "OVER-5", 0.50 },
+            { "OVER-6", 0.40 },
+            { "OVER-7", 0.10 }, //reverse analysis UNDER-8
+            { "OVER-8", 0.30 },
+            { "UNDER-1", 0.30 },
+            { "UNDER-2", 0.10 }, //reverse analysis OVER-1
+            { "UNDER-3", 0.40 },
+            { "UNDER-4", 0.50 },
+            { "UNDER-5", 0.60 },
+            { "UNDER-6", 0.70 },
+            { "UNDER-7", 0.80 },
+            { "UNDER-8", 0.90 },
+            { "UNDER-9", 0.95 },
+            { "EVEN", 0.70 },
+            { "ODD", 0.70 },
+            { "MATCHES-0", 0.30 },{ "MATCHES-1", 0.30 },{ "MATCHES-2", 0.30 },{ "MATCHES-3", 0.30 },{ "MATCHES-4", 0.30 },
+            { "MATCHES-5", 0.30 },{ "MATCHES-6", 0.30 },{ "MATCHES-7", 0.30 },{ "MATCHES-8", 0.30 },{ "MATCHES-9", 0.30 },
+            { "DIFFERS-0", 0.95 },{ "DIFFERS-1", 0.95 },{ "DIFFERS-2", 0.95 },{ "DIFFERS-3", 0.95 },{ "DIFFERS-4", 0.95 },
+            { "DIFFERS-5", 0.95 },{ "DIFFERS-6", 0.95 },{ "DIFFERS-7", 0.95 },{ "DIFFERS-8", 0.95 },{ "DIFFERS-9", 0.95 },
+        };
+
+        #endregion ---[Market]-Information---
+
+        static async Task Main(string[] args)
+        {
+            Console.ForegroundColor = ConsoleColor.White;
+
+            // Show interactive main menu loop
+            while (true)
+            {
+                Console.Clear();
+                PrintTitleHeader();
+                PrintTOOLWelcomeMain();
+
+                Console.WriteLine("[MAIN]-Menu");
+                Console.WriteLine("-----------\n");
+                Console.WriteLine("1. [MANUAL]-Analysis");
+                Console.WriteLine("2. [SAMPLE]-Analysis");
+                Console.WriteLine("3. [QUANTUM]-Sweep");
+                Console.WriteLine("4. [EDGE]-Analysis");
+                Console.WriteLine("5. [STRATEGY]-Playbook\n");
+                Console.WriteLine("6. [SHUTDOWN]-Tool");
+                Console.Write("\nChoose Option [1-6]: ");
+
+                //UNIVERSAL COMMANDS
+                string option = ReadUserCommand()?.Trim();
+
+                if (string.Equals(option, "C", StringComparison.OrdinalIgnoreCase) || option == "6")
+                {
+                    Console.WriteLine("\n[DIGIT]-Sniper TOOL Shutting down, press [ENTER] to close...");
+                    return;
+                }
+
+                //OPTIONS
+                if (option == "1")
+                {
+                    //Manual-Analysis
+                    Console.Clear();
+                    PrintTitleHeader();
+                    PrintTOOLScreenDescription("[MANUAL]-Analysis", "[MANUAL] mode: you pick an asset for [MANUAL] digit-analysis and monitor a live trading screen. Enter settings to begin.");
+
+                    // Initial settings selection (validated)
+                    if (!SelectSettingsValidated_Manual()) continue;
+
+                    // post-setup options (validated)
+                    ShowPostSetupMenuValidated_Manual();
+
+                    // Fill rolling window from history for the chosen market
+                    await FillRollingWindowFromHistory_Manual();
+
+                    // Start live websocket trading for this market
+                    await RunWebSocket_Manual();
+                }
+                if (option == "2")
+                {
+                    //Manual-Analysis
+                    Console.Clear();
+                    PrintTitleHeader();
+                    PrintTOOLScreenDescription("[SAMPLE]-Analysis", "[SAMPLE] mode: you pick an asset for [SAMPLE]-Analysis and monitor a live trading screen. Enter settings to begin.");
+
+                    // Initial settings selection (validated)
+                    if (!SelectSettingsValidated_Samples()) continue;
+
+                    // post-setup options (validated)
+                    ShowPostSetupMenuValidated_Samples();
+
+                    // Fill rolling window from history for the chosen market
+                    await FillRollingWindowFromHistory_Samples();
+
+                    // Start live websocket trading for this market
+                    await RunWebSocket_Samples();
+                }
+                else if (option == "3")
+                {
+                    // Quantum-Analysis
+                    Console.Clear();
+                    PrintTitleHeader();
+                    PrintTOOLScreenDescription2("[QUANTUM]-Sweep", "[QUANTUM] mode: I will scan all markets according to the settings you provide and report markets currently in [EDGE]-conditions.");
+
+                    // Ask the user to select mode
+                    Console.WriteLine("Choose mode:\n");
+                    Console.WriteLine("1. [MANUAL]-Analysis");
+                    Console.WriteLine("2. [SAMPLES]-Analysis");
+                    string subOption = Console.ReadLine();
+
+                    // Execute based on the trader's choice
+                    if (subOption == "1")
+                    {
+                        Console.WriteLine();
+                        await RunQuantumAnalysis_Manual();  // Run Manual Analysis
+                    }
+                    else if (subOption == "2")
+                    {
+                        Console.WriteLine();
+                        await RunQuantumAnalysis_Samples();  // Run Samples Analysis
+                    }
+                    else
+                    {
+                        Console.WriteLine("Invalid option. Returning to main menu...");
+                    }
+                }
+                else if (option == "4")
+                {
+                    // [EDGE]-Analysis
+                    Console.Clear();
+                    PrintTitleHeader();
+                    PrintTOOLScreenDescription("[STRATEGY]-Backtest", "{EDGE} Mode: Evaluation of potential variable conditions and we see a clear summary of the strategy and its profitability.");
+
+                    // Initial settings selection (validated)
+                    if (!SelectSettingsValidated_Samples_BACKTEST()) continue;
+
+                    // post-setup options (validated)
+                    ShowPostSetupMenuValidated_Samples_BACKTEST();
+
+                    // Fill rolling window from history for the chosen market
+                    await StrategyBacktest_Samples();
+                }
+                else if (option == "5")
+                {
+                    //[STRATEGY]-Playbook
+                    Console.Clear();
+                    PrintTitleHeader();
+                    PrintTOOLScreenDescription2("[STRATEGY]-Playbook", "{STRATEGY} Mode: Below are a list of the scientifically proven [EDGES] and clear descriptions of each.");
+                    Console.WriteLine("---------------------------------------------------");
+                    Console.WriteLine("        [BINARY]-STRATEGY PLAYBOOK");
+                    Console.WriteLine("---------------------------------------------------\n");
+                    Console.WriteLine("A Professional Trader’s Guide to Controlled Aggression");
+                    Console.WriteLine("and Disciplined Execution.\n");
+
+                    // ===================================================
+                    // [STRATEGY] : [KRYPTONITE] STRATEGY
+                    // ===================================================
+                    Console.WriteLine("---------------------------------------------------");
+                    Console.WriteLine(" [STRATEGY] - THE [KRYPTONITE] STRATEGY");
+                    Console.WriteLine("---------------------------------------------------\n");
+
+                    Console.WriteLine("The Kryptonite Strategy fuses aggressive compounding");
+                    Console.WriteLine("with disciplined capital protection. It uses compounding");
+                    Console.WriteLine("for rapid growth and recovery mode to protect equity.\n");
+
+                    Console.WriteLine("[CORE]-PHILOSOPHY\n");
+                    Console.WriteLine("- Compound until {TP} is reached.");
+                    Console.WriteLine("- If balance falls below starting size, enter Recovery Mode.");
+                    Console.WriteLine("- Reset only at {TP} or at breakeven.\n");
+
+                    Console.WriteLine("[COMPOUNDING]-PHASE\n");
+                    Console.WriteLine("- Each win adds profit to next stake.");
+                    Console.WriteLine("- Continue until {TP} is reached.");
+                    Console.WriteLine("- Reset stake to base amount after {TP}.\n");
+
+                    Console.WriteLine("[RECOVERY]-MODE\n");
+                    Console.WriteLine("- If a loss drops balance below start, switch to Recovery.");
+                    Console.WriteLine("- Compound only until account reaches breakeven.");
+                    Console.WriteLine("- Once breakeven is restored, reset and restart.\n");
+
+                    Console.WriteLine("[SIMULATION]-EXAMPLE : {TP}\n");
+                    Console.WriteLine("Starting Balance : $20.00USD -> Stake $1.00USD");
+                    Console.WriteLine("Trade 1          : $1.00USD  -> $1.95USD");
+                    Console.WriteLine("Trade 2          : $1.95USD  -> $3.80USD");
+                    Console.WriteLine("Trade 3          : $3.80USD  -> $7.40USD");
+                    Console.WriteLine("Trade 4          : $7.40USD  -> $14.00USD");
+                    Console.WriteLine("Trade 5          : $14.00USD -> $26.60USD -> [TP] Reached ***");
+                    Console.WriteLine("Account          : $46.60USD\n");
+
+                    Console.WriteLine("[SIMULATION]-EXAMPLE : {RECOVERY}\n");
+                    Console.WriteLine("Starting Balance : $20.00USD -> Stake $1.00USD");
+                    Console.WriteLine("Trade 1          : $14.00USD -> $14.95USD");
+                    Console.WriteLine("Trade 2          : $14.95USD -> $16.80USD");
+                    Console.WriteLine("Trade 3          : $16.80USD -> $18.40USD");
+                    Console.WriteLine("Trade 4          : $18.40USD -> $19.30USD");
+                    Console.WriteLine("Trade 5          : $19.30USD -> $20.00USD -> [RECOVERY] Reached ***");
+                    Console.WriteLine("Account          : $20.00USD\n");
+
+                    Console.WriteLine("[EDGE]\n");
+                    Console.WriteLine("Combines compounding acceleration with recovery safety.\n");
+
+                    Console.WriteLine("---------------------------------------------------");
+                    Console.WriteLine("Quote: \"Trading is not about predicting the next move,");
+                    Console.WriteLine("but about managing yourself when the move comes.\"");
+                    Console.WriteLine("\n— Mark Douglas");
+                    Console.WriteLine("---------------------------------------------------\n");
+
+                    Console.WriteLine("Press anything to return to [Main]-Menu...");
+                    Console.ReadKey();
+                }
+                else
+                {
+                    Console.WriteLine("INVALID");
+                    await Task.Delay(500);
+                }
+            }
+        }//Main
+
+        #region --- UI / [DIGIT]-Sniper Text Helpers ---
+        private static void PrintTitleHeader()
+        {
+            Console.ForegroundColor = ConsoleColor.Cyan;
+            Console.WriteLine("==================================================");
+
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.Write("[");
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.Write("DIGIT");
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.Write("]-");
+
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.Write("SNIPER ");
+
+            Console.ForegroundColor = ConsoleColor.Magenta;
+            Console.WriteLine("Analysis TOOL");
+
+            Console.ForegroundColor = ConsoleColor.Cyan;
+            Console.WriteLine("==================================================");
+
+            // Reset to default color
+            Console.ResetColor();
+        }
+        private static void PrintTOOLWelcomeMain()
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+
+            Console.WriteLine("\n***** Welcome, Binary Market Maverick! *****\n");
+
+            Console.ForegroundColor = ConsoleColor.Cyan;
+
+            Console.WriteLine("Welcome to your [DIGIT]-SNIPER TOOL — the ultimate edge in binary trading.");
+            Console.WriteLine("Every tick, streak, and probability is analyzed in real-time to identify high-confidence setups.");
+            Console.WriteLine("Choose your mode: [Single] for precise one-market analysis, [Manual] to explore rolling-window insights,");
+            Console.WriteLine("or [Quantum] to scan all markets, detect active edges, and target the best trading opportunities across the grid.");
+            Console.WriteLine("Your data-driven sniper is ready to turn information into consistent wins!");
+
+            Console.ForegroundColor = ConsoleColor.White;
+
+            Console.WriteLine("\n[C]-Close Application\n[M]-Main menu\n[B]-Back.\n");
+        }
+        private static void PrintTOOLScreenDescription(string screenTitle, string message)
+        {
+            Console.ForegroundColor = ConsoleColor.White;
+            Console.WriteLine("--------------------------------------------------");
+            Console.WriteLine($"[Screen]: {screenTitle}");
+            Console.WriteLine("--------------------------------------------------\n");
+            Console.WriteLine(message + "\n");
+            Console.WriteLine("[C]-Close Application\n[M]-Main Menu\n[B]-Back\n");
+        }
+        private static void PrintTOOLScreenDescription2(string screenTitle, string message)
+        {
+            Console.ForegroundColor = ConsoleColor.White;
+            Console.WriteLine("--------------------------------------------------");
+            Console.WriteLine($"[Screen]: {screenTitle}");
+            Console.WriteLine("--------------------------------------------------\n");
+            Console.WriteLine(message + "\n");
+            Console.WriteLine("[C]-Close Application\n[M]-Main Menu\n");
+        }
+        #endregion --- UI / [DIGIT]-Sniper Text Helpers --- 
+
+        #region --- WebSocket helpers ---
+        private static async Task<string> ReceiveFullMessage(ClientWebSocket ws)
+        {
+            var buffer = new ArraySegment<byte>(new byte[8192]);
+            using (var ms = new System.IO.MemoryStream())
+            {
+                WebSocketReceiveResult result;
+                do
+                {
+                    result = await ws.ReceiveAsync(buffer, CancellationToken.None);
+                    ms.Write(buffer.Array, buffer.Offset, result.Count);
+                }
+                while (!result.EndOfMessage);
+
+                ms.Seek(0, System.IO.SeekOrigin.Begin);
+                return Encoding.UTF8.GetString(ms.ToArray());
+            }
+        }
+        #endregion--- WebSocket helpers ---
+
+        #region --- Settings selection (validated prompts, no silent defaults) ---
+
+        private static bool SelectSettingsValidated_Manual()
+        {
+            // --- Select market ---
+            if (!SelectMarketValidated()) return false;
+
+            // --- Select type ---
+            while (true)
+            {
+                Console.Write("Select trade type (OVER|UNDER, MATCHES|DIFFERS, EVEN|ODD)\t: ");
+                string input = ReadUserCommand();
+                if (string.Equals(input, "M", StringComparison.OrdinalIgnoreCase)) return false;
+                if (string.Equals(input, "C", StringComparison.OrdinalIgnoreCase)) { Environment.Exit(0); return false; }
+                if (string.Equals(input, "B", StringComparison.OrdinalIgnoreCase)) return false;
+
+                input = (input ?? "").Trim().ToUpper();
+
+                if (input == "OVER" || input == "UNDER" ||
+                    input == "MATCHES" || input == "DIFFERS" ||
+                    input == "EVEN" || input == "ODD")
+                {
+                    selectedType = input;
+                    break;
+                }
+
+                Console.WriteLine("Invalid type. Allowed: OVER, UNDER, MATCHES, DIFFERS, EVEN, ODD.");
+            }
+
+            // --- Select digit only if not EVEN/ODD ---
+            if (selectedType != "EVEN" && selectedType != "ODD")
+            {
+                while (true)
+                {
+                    Console.Write("Enter digit threshold (0-9)\t\t\t\t\t: ");
+                    string input = ReadUserCommand();
+                    if (string.Equals(input, "M", StringComparison.OrdinalIgnoreCase)) return false;
+                    if (string.Equals(input, "C", StringComparison.OrdinalIgnoreCase)) { Environment.Exit(0); return false; }
+                    if (string.Equals(input, "B", StringComparison.OrdinalIgnoreCase)) return false;
+
+                    if (int.TryParse(input, out int d) && d >= 0 && d <= 9)
+                    {
+                        selectedDigit = d;
+                        break;
+                    }
+
+                    Console.WriteLine("Invalid digit. Enter an integer between 0 and 9.");
+                }
+            }
+            else
+            {
+                // Set to -1 if EVEN/ODD type since digit not applicable
+                selectedDigit = -1;
+            }
+
+            // --- Select rolling window size ---
+            while (true)
+            {
+                Console.Write("Enter rolling [N]-Digits (20, 50, 100, 500, 1000)\t\t: ");
+                string input = ReadUserCommand();
+                if (string.Equals(input, "M", StringComparison.OrdinalIgnoreCase)) return false;
+                if (string.Equals(input, "C", StringComparison.OrdinalIgnoreCase)) { Environment.Exit(0); return false; }
+                if (string.Equals(input, "B", StringComparison.OrdinalIgnoreCase)) return false;
+
+                if (int.TryParse(input, out int w) && (w == 20|| w == 50 || w == 100 || w == 500 || w == 1000))
+                {
+                    rollingWindowSize = w;
+                    break;
+                }
+
+                Console.WriteLine("Invalid window size. Allowed values: 20, 50, 100, 500 or 1000.");
+            }
+
+            return true;
+        }
+        private static bool SelectSettingsValidated_Samples()
+        {
+            // --- Select market ---
+            if (!SelectMarketValidated()) return false;
+
+            // --- Select type ---
+            while (true)
+            {
+                Console.Write("Select trade type (OVER|UNDER, MATCHES|DIFFERS, EVEN|ODD)\t: ");
+                string input = ReadUserCommand();
+                if (string.Equals(input, "M", StringComparison.OrdinalIgnoreCase)) return false;
+                if (string.Equals(input, "C", StringComparison.OrdinalIgnoreCase)) { Environment.Exit(0); return false; }
+                if (string.Equals(input, "B", StringComparison.OrdinalIgnoreCase)) return false;
+
+                input = (input ?? "").Trim().ToUpper();
+
+                if (input == "OVER" || input == "UNDER" ||
+                    input == "MATCHES" || input == "DIFFERS" ||
+                    input == "EVEN" || input == "ODD")
+                {
+                    selectedType = input;
+                    break;
+                }
+
+                Console.WriteLine("Invalid type. Allowed: OVER, UNDER, MATCHES, DIFFERS, EVEN, ODD.");
+            }
+
+            // --- Select digit only if not EVEN/ODD ---
+            if (selectedType != "EVEN" && selectedType != "ODD")
+            {
+                while (true)
+                {
+                    Console.Write("Enter digit threshold (0-9)\t\t\t\t\t: ");
+                    string input = ReadUserCommand();
+                    if (string.Equals(input, "M", StringComparison.OrdinalIgnoreCase)) return false;
+                    if (string.Equals(input, "C", StringComparison.OrdinalIgnoreCase)) { Environment.Exit(0); return false; }
+                    if (string.Equals(input, "B", StringComparison.OrdinalIgnoreCase)) return false;
+
+                    if (int.TryParse(input, out int d) && d >= 0 && d <= 9)
+                    {
+                        selectedDigit = d;
+                        break;
+                    }
+
+                    Console.WriteLine("Invalid digit. Enter an integer between 0 and 9.");
+                }
+            }
+            else
+            {
+                // Set to -1 if EVEN/ODD type since digit not applicable
+                selectedDigit = -1;
+            }
+
+            // --- Select rolling window size ---
+            while (true)
+            {
+                Console.Write("Enter rolling [N]-Samples (20, 50, 100)\t\t\t\t: ");
+                string input = ReadUserCommand();
+                if (string.Equals(input, "M", StringComparison.OrdinalIgnoreCase)) return false;
+                if (string.Equals(input, "C", StringComparison.OrdinalIgnoreCase)) { Environment.Exit(0); return false; }
+                if (string.Equals(input, "B", StringComparison.OrdinalIgnoreCase)) return false;
+
+                if (int.TryParse(input, out int w) && (w == 20 || w == 50 || w == 100))
+                {
+                    rollingWindowSize = w;
+                    break;
+                }
+
+                Console.WriteLine("Invalid window size. Allowed values: 20, 50, 100.");
+            }
+
+            return true;
+        }
+        private static bool SelectSettingsValidated_Samples_BACKTEST()
+        {
+            // --- Select market ---
+            if (!SelectMarketValidated()) return false;
+
+            // --- Select type ---
+            while (true)
+            {
+                Console.Write("Select trade type (OVER|UNDER, MATCHES|DIFFERS, EVEN|ODD)\t: ");
+                string input = ReadUserCommand();
+                if (string.Equals(input, "M", StringComparison.OrdinalIgnoreCase)) return false;
+                if (string.Equals(input, "C", StringComparison.OrdinalIgnoreCase)) { Environment.Exit(0); return false; }
+                if (string.Equals(input, "B", StringComparison.OrdinalIgnoreCase)) return false;
+
+                input = (input ?? "").Trim().ToUpper();
+
+                if (input == "OVER" || input == "UNDER" ||
+                    input == "MATCHES" || input == "DIFFERS" ||
+                    input == "EVEN" || input == "ODD")
+                {
+                    selectedType = input;
+                    break;
+                }
+
+                Console.WriteLine("Invalid type. Allowed: OVER, UNDER, MATCHES, DIFFERS, EVEN, ODD.");
+            }
+
+            // --- Select digit only if not EVEN/ODD ---
+            if (selectedType != "EVEN" && selectedType != "ODD")
+            {
+                while (true)
+                {
+                    Console.Write("Enter digit threshold (0-9)\t\t\t\t\t: ");
+                    string input = ReadUserCommand();
+                    if (string.Equals(input, "M", StringComparison.OrdinalIgnoreCase)) return false;
+                    if (string.Equals(input, "C", StringComparison.OrdinalIgnoreCase)) { Environment.Exit(0); return false; }
+                    if (string.Equals(input, "B", StringComparison.OrdinalIgnoreCase)) return false;
+
+                    if (int.TryParse(input, out int d) && d >= 0 && d <= 9)
+                    {
+                        selectedDigit = d;
+                        break;
+                    }
+
+                    Console.WriteLine("Invalid digit. Enter an integer between 0 and 9.");
+                }
+            }
+            else
+            {
+                // Set to -1 if EVEN/ODD type since digit not applicable
+                selectedDigit = -1;
+            }
+
+            // --- Select rolling window size ---
+            while (true)
+            {
+                Console.Write("Enter rolling [N]-Samples (100, 200, 500)\t\t\t: ");
+                string input = ReadUserCommand();
+                if (string.Equals(input, "M", StringComparison.OrdinalIgnoreCase)) return false;
+                if (string.Equals(input, "C", StringComparison.OrdinalIgnoreCase)) { Environment.Exit(0); return false; }
+                if (string.Equals(input, "B", StringComparison.OrdinalIgnoreCase)) return false;
+
+                if (int.TryParse(input, out int w) && (w == 100 || w == 200 || w == 500))
+                {
+                    rollingWindowSize = w;
+                    break;
+                }
+
+                Console.WriteLine("Invalid window size. Allowed values: 100, 200, 500.");
+            }
+
+            return true;
+        }
+        private static bool SelectMarketValidated()
+        {
+            while (true)
+            {
+                Console.ForegroundColor = ConsoleColor.White;
+                Console.WriteLine("\nSelect [MARKET]\n");
+                int i = 1;
+                foreach (var kv in marketNames)
+                    Console.WriteLine($"{i++}: \t{kv.Value}");
+                Console.Write("\nEnter [MARKET] Number\t\t\t\t\t\t: ");
+
+                string input = ReadUserCommand();
+                if (string.Equals(input, "M", StringComparison.OrdinalIgnoreCase)) return false;
+                if (string.Equals(input, "C", StringComparison.OrdinalIgnoreCase)) { Environment.Exit(0); return false; }
+                if (string.Equals(input, "B", StringComparison.OrdinalIgnoreCase)) return false;
+
+                if (!int.TryParse(input, out int marketIndex) || marketIndex < 1 || marketIndex > marketNames.Count)
+                {
+                    Console.WriteLine($"Invalid selection. Enter a number between 1 and {marketNames.Count}.");
+                    continue;
+                }
+
+                selectedMarket = marketNames.Keys.ElementAt(marketIndex - 1);
+
+                return true;
+            }
+        }
+        private static void ShowPostSetupMenuValidated_Manual()
+        {
+            while (true)
+            {
+                Console.WriteLine("\n[CONFIRMATION]-Settings:\n");
+                Console.WriteLine("1. Change Market.");
+                Console.WriteLine("2. Change Settings.");
+                Console.WriteLine("3. Start Trading.");
+                Console.Write("\nChoose Option: ");
+
+                string input = ReadUserCommand();
+
+                // Universal commands at main menu level
+                if (string.Equals(input, "C", StringComparison.OrdinalIgnoreCase)) { Environment.Exit(0); }
+                if (string.Equals(input, "M", StringComparison.OrdinalIgnoreCase)) return;
+                if (string.Equals(input, "B", StringComparison.OrdinalIgnoreCase)) return;
+
+                if (input == "1")
+                {
+                    SelectMarketValidated(); // user selects market
+                }
+                else if (input == "2")
+                {
+                    // Change Settings
+                    while (true)
+                    {
+                        Console.Write("Enter rolling [N]-Digits (20, 50, 100, 500, 1000)\t: ");
+                        string w = ReadUserCommand();
+
+                        if (string.Equals(w, "C", StringComparison.OrdinalIgnoreCase)) { Environment.Exit(0); }
+                        if (string.Equals(w, "M", StringComparison.OrdinalIgnoreCase)) return;
+                        if (string.Equals(w, "B", StringComparison.OrdinalIgnoreCase)) return; // back to main menu
+
+                        if (int.TryParse(w, out int wins) && (wins == 20 || wins == 50 || wins == 100 || wins == 500 || wins == 1000))
+                        {
+                            rollingWindowSize = wins;
+                            break;
+                        }
+                        Console.WriteLine("Invalid window size. Allowed values are 20, 50, 100, 500 or 1000.");
+                    }
+                }
+                else if (input == "3")
+                {
+                    Console.WriteLine("\nConnecting to DERIV...");
+                    break; // exit menu loop and start trading
+                }
+                else
+                {
+                    Console.WriteLine("Invalid Option. Choose 1, 2, or 3.");
+                }
+            }
+        }
+        private static void ShowPostSetupMenuValidated_Samples()
+        {
+            while (true)
+            {
+                Console.WriteLine("\n[CONFIRMATION]-Settings:\n");
+                Console.WriteLine("1. Change Market.");
+                Console.WriteLine("2. Change Settings.");
+                Console.WriteLine("3. Start Trading.");
+                Console.Write("\nChoose Option: ");
+
+                string input = ReadUserCommand();
+
+                // Universal commands at main menu level
+                if (string.Equals(input, "C", StringComparison.OrdinalIgnoreCase)) { Environment.Exit(0); }
+                if (string.Equals(input, "M", StringComparison.OrdinalIgnoreCase)) return;
+                if (string.Equals(input, "B", StringComparison.OrdinalIgnoreCase)) return;
+
+                if (input == "1")
+                {
+                    SelectMarketValidated(); // user selects market
+                }
+                else if (input == "2")
+                {
+                    // Change Settings
+                    while (true)
+                    {
+                        Console.Write("Enter rolling [N]-Samples (20, 50, 100)\t\t: ");
+                        string w = ReadUserCommand();
+
+                        if (string.Equals(w, "C", StringComparison.OrdinalIgnoreCase)) { Environment.Exit(0); }
+                        if (string.Equals(w, "M", StringComparison.OrdinalIgnoreCase)) return;
+                        if (string.Equals(w, "B", StringComparison.OrdinalIgnoreCase)) return; // back to main menu
+
+                        if (int.TryParse(w, out int wins) && (wins == 20 || wins == 50 || wins == 100))
+                        {
+                            rollingWindowSize = wins;
+                            break;
+                        }
+                        Console.WriteLine("Invalid window size. Allowed values are 20, 50, 100.");
+                    }
+                }
+                else if (input == "3")
+                {
+                    Console.WriteLine("\nConnecting to DERIV...");
+                    break; // exit menu loop and start trading
+                }
+                else
+                {
+                    Console.WriteLine("Invalid Option. Choose 1, 2, or 3.");
+                }
+            }
+        }
+        private static void ShowPostSetupMenuValidated_Samples_BACKTEST()
+        {
+            while (true)
+            {
+                Console.WriteLine("\n[CONFIRMATION]-Settings:\n");
+                Console.WriteLine("1. Change Market.");
+                Console.WriteLine("2. Change Settings.");
+                Console.WriteLine("3. Start Trading.");
+                Console.Write("\nChoose Option: ");
+
+                string input = ReadUserCommand();
+
+                // Universal commands at main menu level
+                if (string.Equals(input, "C", StringComparison.OrdinalIgnoreCase)) { Environment.Exit(0); }
+                if (string.Equals(input, "M", StringComparison.OrdinalIgnoreCase)) return;
+                if (string.Equals(input, "B", StringComparison.OrdinalIgnoreCase)) return;
+
+                if (input == "1")
+                {
+                    SelectMarketValidated(); // user selects market
+                }
+                else if (input == "2")
+                {
+                    // Change Settings
+                    while (true)
+                    {
+                        Console.Write("Enter rolling [N]-Samples (100, 200, 500)\t\t: ");
+                        string w = ReadUserCommand();
+
+                        if (string.Equals(w, "C", StringComparison.OrdinalIgnoreCase)) { Environment.Exit(0); }
+                        if (string.Equals(w, "M", StringComparison.OrdinalIgnoreCase)) return;
+                        if (string.Equals(w, "B", StringComparison.OrdinalIgnoreCase)) return; // back to main menu
+
+                        if (int.TryParse(w, out int wins) && (wins == 100 || wins == 200 || wins == 500))
+                        {
+                            rollingWindowSize = wins;
+                            break;
+                        }
+                        Console.WriteLine("Invalid window size. Allowed values are 100, 200, 500.");
+                    }
+                }
+                else if (input == "3")
+                {
+                    Console.WriteLine("\nConnecting to DERIV...");
+                    break; // exit menu loop and start trading
+                }
+                else
+                {
+                    Console.WriteLine("Invalid Option. Choose 1, 2, or 3.");
+                }
+            }
+        }
+
+        #endregion --- Settings selection (validated prompts, no silent defaults) ---
+
+        #region --- Utility: Read user commands and handle universal tokens ---
+        // This central function reads input and returns it; special tokens like MENU/BACK/CLOSE are passed to caller to handle.
+        private static string ReadUserCommand()
+        {
+            string input = Console.ReadLine();
+            if (input == null) return "";
+            return input.Trim();
+        }
+        #endregion --- Utility: Read user commands and handle universal tokens ---
+
+        #region --- History fill ---
+
+        private static async Task FillRollingWindowFromHistory_Manual()
+        {
+            var url = new Uri("wss://ws.derivws.com/websockets/v3?app_id=1089");
+
+            using (ClientWebSocket ws = new ClientWebSocket())
+            {
+                await ws.ConnectAsync(url, CancellationToken.None);
+
+                string historyRequest = $@"{{
+                ""ticks_history"": ""{selectedMarket}"",
+                ""end"": ""latest"",
+                ""count"": ""2500"",
+                ""style"": ""ticks""}}";
+
+                await ws.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes(historyRequest)),
+                    WebSocketMessageType.Text, true, CancellationToken.None);
+
+                string message = await ReceiveFullMessage(ws);
+                JObject json = JObject.Parse(message);
+
+                if (json["history"]?["prices"] != null)
+                {
+                    var prices = json["history"]["prices"].Select(p => (decimal)p).ToList();
+                    int dps = marketDecimalPlaces.ContainsKey(selectedMarket) ? marketDecimalPlaces[selectedMarket] : 2;
+
+                    rollingDigits = new Queue<int>();
+
+                    int? lastDigitInHistory = null;
+
+                    for (int i = 0; i < prices.Count; i++)
+                    {
+                        string priceStr = prices[i].ToString($"F{dps}");
+                        int curDigit = int.Parse(priceStr[priceStr.Length - 1].ToString());
+
+                        rollingDigits.Enqueue(curDigit);
+                        if (rollingDigits.Count > rollingWindowSize)//rolling digit window
+                            rollingDigits.Dequeue();
+
+                        lastDigitInHistory = curDigit;
+                    }
+
+                    previousDigit = int.Parse(prices.Last().ToString($"F{dps}")[prices.Last().ToString($"F{dps}").Length - 1].ToString());
+                }
+
+                try { await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None); } catch { }
+            }
+        }
+        private static async Task FillRollingWindowFromHistory_Samples()
+        {
+            var url = new Uri("wss://ws.derivws.com/websockets/v3?app_id=1089");
+
+            using (ClientWebSocket ws = new ClientWebSocket())
+            {
+                await ws.ConnectAsync(url, CancellationToken.None);
+
+                // Request historical ticks for the selected market
+                string historyRequest = $@"{{
+                ""ticks_history"": ""{selectedMarket}"",
+                ""end"": ""latest"",
+                ""count"": ""20000"",
+                ""style"": ""ticks""
+                }}";
+
+                await ws.SendAsync(
+                    new ArraySegment<byte>(Encoding.UTF8.GetBytes(historyRequest)),
+                    WebSocketMessageType.Text,
+                    true,
+                    CancellationToken.None
+                );
+
+                // Receive and parse response
+                string message = await ReceiveFullMessage(ws);
+                JObject json = JObject.Parse(message);
+
+                if (json["history"]?["prices"] != null)
+                {
+                    var prices = json["history"]["prices"].Select(p => (decimal)p).ToList();
+
+                    // Get market decimal places
+                    int dps = marketDecimalPlaces.ContainsKey(selectedMarket) ? marketDecimalPlaces[selectedMarket] : 2;
+
+                    rollingSamples = new Queue<int>();
+
+                    // Extract digits
+                    List<int> samples = new List<int>();
+                    foreach (var price in prices)
+                    {
+                        string priceStr = price.ToString($"F{dps}");
+                        int lastDigit = int.Parse(priceStr[priceStr.Length - 1].ToString());
+
+                        if(IsSuccess(lastDigit))
+                        {
+                            currentSampleLength++;//increment current streak
+                        }
+                        else
+                        {
+                            if (currentSampleLength > 0)
+                            {
+                                samples.Add(currentSampleLength);
+                                currentSampleLength = 0;//reset streak
+                            }
+                        }
+                    }
+
+                    // Fill rollingSamples with last [N] Samples
+                    foreach (int d in samples.Skip(Math.Max(0, samples.Count - rollingWindowSize)))
+                        rollingSamples.Enqueue(d);
+
+                    // Store last sample for live streaming
+                    previousSample = samples.Last();
+                }
+
+                try
+                {
+                    await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
+                }
+                catch
+                {
+                    // Ignore cleanup errors
+                }
+            }
+        }
+       
+        #endregion --- History fill ---
+
+        #region --- Live WebSocket trading loops ---
+
+        private static async Task RunWebSocket_Manual()
+        {
+            var url = new Uri("wss://ws.derivws.com/websockets/v3?app_id=1089");
+
+            while (true)
+            {
+                using (ClientWebSocket ws = new ClientWebSocket())
+                {
+                    CancellationTokenSource pingCts = new CancellationTokenSource();
+
+                    try
+                    {
+                        await ws.ConnectAsync(url, CancellationToken.None);
+
+                        // 🟢 Load historical digits before going live
+                        Console.WriteLine($"\n[INIT] Loading last [{rollingDigits.Count}]-DIGITS from history for {selectedMarket}...");
+                        await FillRollingWindowFromHistory_Manual();
+                        Console.ForegroundColor = ConsoleColor.Green;
+                        Console.WriteLine("[INIT] History loaded successfully. Subscribing to live TICKS...");
+                        Console.ResetColor();
+
+                        // 🔹 Subscribe to live ticks
+                        string subscribeMessage = $"{{\"ticks\":\"{selectedMarket}\"}}";
+                        await ws.SendAsync(
+                            new ArraySegment<byte>(Encoding.UTF8.GetBytes(subscribeMessage)),
+                            WebSocketMessageType.Text, true, CancellationToken.None
+                        );
+
+                        // 🔹 Background ping (heartbeat)
+                        Task pingTask = Task.Run(async () =>
+                        {
+                            while (!pingCts.Token.IsCancellationRequested && ws.State == WebSocketState.Open)
+                            {
+                                try
+                                {
+                                    const string ping = "{\"ping\":1}";
+                                    await ws.SendAsync(
+                                        new ArraySegment<byte>(Encoding.UTF8.GetBytes(ping)),
+                                        WebSocketMessageType.Text, true, pingCts.Token
+                                    );
+                                    await Task.Delay(20000, pingCts.Token);
+                                }
+                                catch
+                                {
+                                    break;
+                                }
+                            }
+                        });
+
+                        // 🔹 Receive and process live ticks
+                        byte[] buffer = new byte[8192];
+                        while (ws.State == WebSocketState.Open)
+                        {
+                            var result = await ws.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
+                            if (result.MessageType == WebSocketMessageType.Close)
+                                break;
+
+                            var message = Encoding.UTF8.GetString(buffer, 0, result.Count);
+                            JObject json = JObject.Parse(message);
+
+                            if (json["tick"] != null)
+                            {
+                                decimal price = (decimal)json["tick"]["quote"];
+                                HandleTick_Digits_Manual(price); // update queue + trigger analysis + print metrics
+                            }
+                        }
+                    }
+                    catch (WebSocketException ex)
+                    {
+                        Console.ForegroundColor = ConsoleColor.Yellow;
+                        Console.WriteLine($"[WARN] WebSocket exception: {ex.Message}");
+                        Console.ResetColor();
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.ForegroundColor = ConsoleColor.Red;
+                        Console.WriteLine($"[ERROR] General error: {ex.Message}");
+                        Console.ResetColor();
+                    }
+                    finally
+                    {
+                        pingCts.Cancel();
+                        Console.ForegroundColor = ConsoleColor.DarkYellow;
+                        Console.WriteLine("[RESET] Disconnected. Clearing rolling window...");
+                        Console.ResetColor();
+
+                        previousDigit = null;
+
+                        // 🔹 Reset rolling window
+                        rollingDigits?.Clear();
+                    }
+                }
+
+                // 🔁 Auto-reconnect delay
+                Console.ForegroundColor = ConsoleColor.Cyan;
+                Console.WriteLine("\n[RECONNECT] Connection lost. Reconnecting in 2 seconds...\n");
+                Console.ResetColor();
+                await Task.Delay(2000);
+            }
+        }
+        private static async Task RunWebSocket_Samples()
+        {
+            var url = new Uri("wss://ws.derivws.com/websockets/v3?app_id=1089");
+
+            while (true)
+            {
+                using (ClientWebSocket ws = new ClientWebSocket())
+                {
+                    CancellationTokenSource pingCts = new CancellationTokenSource();
+
+                    try
+                    {
+                        await ws.ConnectAsync(url, CancellationToken.None);
+
+                        // 🟢 Load historical digits before going live
+                        Console.WriteLine($"\n[INIT] Loading last [{rollingSamples.Count}]-SAMPLES from history for {selectedMarket}...");
+                        await FillRollingWindowFromHistory_Samples();
+                        Console.ForegroundColor = ConsoleColor.Green;
+                        Console.WriteLine("[INIT] History loaded successfully. Subscribing to live SAMPLES...");
+                        Console.ResetColor();
+
+                        // 🔹 Subscribe to live ticks
+                        string subscribeMessage = $"{{\"ticks\":\"{selectedMarket}\"}}";
+                        await ws.SendAsync(
+                            new ArraySegment<byte>(Encoding.UTF8.GetBytes(subscribeMessage)),
+                            WebSocketMessageType.Text, true, CancellationToken.None
+                        );
+
+                        // 🔹 Background ping (heartbeat)
+                        Task pingTask = Task.Run(async () =>
+                        {
+                            while (!pingCts.Token.IsCancellationRequested && ws.State == WebSocketState.Open)
+                            {
+                                try
+                                {
+                                    const string ping = "{\"ping\":1}";
+                                    await ws.SendAsync(
+                                        new ArraySegment<byte>(Encoding.UTF8.GetBytes(ping)),
+                                        WebSocketMessageType.Text, true, pingCts.Token
+                                    );
+                                    await Task.Delay(20000, pingCts.Token);
+                                }
+                                catch
+                                {
+                                    break;
+                                }
+                            }
+                        });
+
+                        // 🔹 Receive and process live ticks
+                        byte[] buffer = new byte[8192];
+                        while (ws.State == WebSocketState.Open)
+                        {
+                            var result = await ws.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
+                            if (result.MessageType == WebSocketMessageType.Close)
+                                break;
+
+                            var message = Encoding.UTF8.GetString(buffer, 0, result.Count);
+                            JObject json = JObject.Parse(message);
+
+                            if (json["tick"] != null)
+                            {
+                                decimal price = (decimal)json["tick"]["quote"];
+                                HandleTick_Digits_Samples(price); // update queue + trigger analysis + print metrics
+                            }
+                        }
+                    }
+                    catch (WebSocketException ex)
+                    {
+                        Console.ForegroundColor = ConsoleColor.Yellow;
+                        Console.WriteLine($"[WARN] WebSocket exception: {ex.Message}");
+                        Console.ResetColor();
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.ForegroundColor = ConsoleColor.Red;
+                        Console.WriteLine($"[ERROR] General error: {ex.Message}");
+                        Console.ResetColor();
+                    }
+                    finally
+                    {
+                        pingCts.Cancel();
+                        Console.ForegroundColor = ConsoleColor.DarkYellow;
+                        Console.WriteLine("[RESET] Disconnected. Clearing rolling window...");
+                        Console.ResetColor();
+
+                        previousDigit = null;
+
+                        // 🔹 Reset rolling window
+                        rollingDigits?.Clear();
+                    }
+                }
+
+                // 🔁 Auto-reconnect delay
+                Console.ForegroundColor = ConsoleColor.Cyan;
+                Console.WriteLine("\n[RECONNECT] Connection lost. Reconnecting in 2 seconds...\n");
+                Console.ResetColor();
+                await Task.Delay(2000);
+            }
+        }
+
+        #endregion --- Live WebSocket trading loops ---
+
+        #region --- Analytics & [Trade]-Mode ---
+
+        private static void HandleTick_Digits_Manual(decimal price)
+        {
+            Console.ForegroundColor = ConsoleColor.White;
+
+            // --- Extract last digit from price ---
+            int dps = marketDecimalPlaces.ContainsKey(selectedMarket) ? marketDecimalPlaces[selectedMarket] : 2;
+            string priceStr = price.ToString($"F{dps}");
+            int lastDigit = int.Parse(priceStr[priceStr.Length - 1].ToString());
+
+            string outcomeLabel = "";
+            switch (selectedType.ToUpper())
+            {
+                case "OVER":
+                    outcomeLabel = lastDigit > selectedDigit ? "(OVER)" : "(UNDER)";
+                    break;
+                case "UNDER":
+                    outcomeLabel = lastDigit < selectedDigit ? "(UNDER)" : "(OVER)";
+                    break;
+                case "MATCHES":
+                    outcomeLabel = lastDigit == selectedDigit ? "(MATCHES)" : "(DIFFERS)";
+                    break;
+                case "DIFFERS":
+                    outcomeLabel = lastDigit != selectedDigit ? "(DIFFERS)" : "(MATCHES)";
+                    break;
+                case "EVEN":
+                    outcomeLabel = lastDigit % 2 == 0 ? "(EVEN)" : "(ODD)";
+                    break;
+                case "ODD":
+                    outcomeLabel = lastDigit % 2 != 0 ? "(ODD)" : "(EVEN)";
+                    break;
+                default:
+                    outcomeLabel = "";
+                    break;
+            }
+
+            // Update rolling window
+            rollingDigits.Enqueue(lastDigit);
+            if (rollingDigits.Count > rollingWindowSize)
+                rollingDigits.Dequeue();
+
+            previousDigit = lastDigit;
+
+            // Run deep analysis
+            DIGIT_Brain_Manual();
+
+            // --- Clear console and print dashboard ---
+            Console.Clear();
+            PrintTitleHeader();
+            Console.ForegroundColor = ConsoleColor.White;
+            Console.WriteLine($"Market\t\t: {marketNames[selectedMarket]}");
+            Console.WriteLine($"Type\t\t: {selectedType}");
+
+            if (selectedDigit == -1)
+                Console.WriteLine("Digit\t\t: NULL");
+            else
+                Console.WriteLine($"Digit\t\t: {selectedDigit}");
+
+            Console.WriteLine($"Rolling Size\t: {rollingWindowSize}");
+            Console.WriteLine($"Current Price\t: {priceStr}");
+            Console.WriteLine($"Last Digit\t: {lastDigit}");
+            Console.WriteLine($"Outcome\t\t: {outcomeLabel}");
+
+            // --- Digit display ---
+            Console.WriteLine("\n[DIGIT] - DISPLAY");
+            Console.WriteLine(new string('=', 50));
+
+            for (int i = 0; i <= 9; i++)
+            {
+                if (selectedDigit == -1)
+                {
+                    // EVEN/ODD mode coloring
+                    Console.ForegroundColor = (i % 2 == 0) ? ConsoleColor.Green : ConsoleColor.Magenta;
+                }
+                else
+                {
+                    // Normal mode coloring
+                    Console.ForegroundColor = (i == selectedDigit) ? ConsoleColor.Yellow : ConsoleColor.White;
+                }
+
+                Console.Write($" {i} ");
+            }
+            Console.WriteLine();
+            Console.ResetColor();
+
+            // --- Pointer for last digit ---
+            for (int i = 0; i <= 9; i++)
+            {
+                Console.ForegroundColor = (i == lastDigit) ? ConsoleColor.Cyan : ConsoleColor.White;
+                Console.Write(i == lastDigit ? " ^ " : "   ");
+            }
+            Console.WriteLine();
+            Console.ResetColor();
+
+            // --- [DIGIT]-Frequencies
+            Console.ForegroundColor = ConsoleColor.White;
+
+            Console.WriteLine("\n[DIGIT] - ROLLING FREQUENCY DISTRIBUTION");
+            Console.WriteLine("==================================================");
+
+            Console.ForegroundColor = ConsoleColor.White;
+
+            // Get the frequency of each digit in the rolling window
+            int[] freq = new int[10];
+            foreach (var d in rollingDigits)
+            {
+                freq[d]++;
+            }
+
+            // Calculate total number of digits in the rolling window for frequency percentage
+            int totalDigits = rollingDigits.Count;
+            if (totalDigits > 0)
+            {
+                // Find the max and min frequencies
+                int maxFreq = freq.Max();
+                int minFreq = freq.Min();
+
+                for (int d = 0; d <= 9; d++)
+                {
+                    // Calculate the frequency percentage for the digit in the rolling window
+                    double digitFrequency = (double)freq[d] / totalDigits * 100;
+
+                    // Highlight the highest frequency digit in GREEN, the lowest in RED, and the rest in WHITE
+                    if (freq[d] == maxFreq)
+                    {
+                        Console.ForegroundColor = ConsoleColor.Green; // Highest frequency
+                    }
+                    else if (freq[d] == minFreq)
+                    {
+                        Console.ForegroundColor = ConsoleColor.Red; // Lowest frequency
+                    }
+                    else
+                    {
+                        Console.ForegroundColor = ConsoleColor.White; // All others are white
+                    }
+
+                    Console.WriteLine($"[DIGIT] - FREQUENCY [{d}]-->>({digitFrequency:F2}%)");
+                }
+            }
+            else
+            {
+                Console.ForegroundColor = ConsoleColor.White;
+                Console.WriteLine("[DIGIT] - FREQUENCIES-->>NO DATA YET...");
+            }
+
+            Console.ForegroundColor = ConsoleColor.White;
+            Console.WriteLine("==================================================");
+
+            // --- Print metrics ---
+            PrintMetrics_Digits_Manual(); // or general metrics method
+
+            // --- Key press for returning to main menu ---
+
+            Console.ForegroundColor = ConsoleColor.White;
+            Console.WriteLine("\nPress [ANY-KEY] to return to [MAIN]-Menu...\n");
+            if (Console.KeyAvailable)
+            {
+                Console.ReadKey(true); // consume the key without showing it
+                ReturnToMainMenu();
+            }
+        }
+        private static void HandleTick_Digits_Samples(decimal price)
+        {
+            Console.ForegroundColor = ConsoleColor.White;
+
+            // --- Extract last digit from price ---
+            int dps = marketDecimalPlaces.ContainsKey(selectedMarket) ? marketDecimalPlaces[selectedMarket] : 2;
+            string priceStr = price.ToString($"F{dps}");
+            int lastDigit = int.Parse(priceStr[priceStr.Length - 1].ToString());
+            string outcomeLabel = "";
+
+            switch (selectedType.ToUpper())
+            {
+                case "OVER":
+                    outcomeLabel = lastDigit > selectedDigit ? "(OVER)" : "(UNDER)";
+                    break;
+                case "UNDER":
+                    outcomeLabel = lastDigit < selectedDigit ? "(UNDER)" : "(OVER)";
+                    break;
+                case "MATCHES":
+                    outcomeLabel = lastDigit == selectedDigit ? "(MATCHES)" : "(DIFFERS)";
+                    break;
+                case "DIFFERS":
+                    outcomeLabel = lastDigit != selectedDigit ? "(DIFFERS)" : "(MATCHES)";
+                    break;
+                case "EVEN":
+                    outcomeLabel = lastDigit % 2 == 0 ? "(EVEN)" : "(ODD)";
+                    break;
+                case "ODD":
+                    outcomeLabel = lastDigit % 2 != 0 ? "(ODD)" : "(EVEN)";
+                    break;
+                default:
+                    outcomeLabel = "";
+                    break;
+            }
+
+            // --- Check if tick is a success ---
+            bool isSuccess = IsSuccess(lastDigit);
+
+            if (isSuccess)
+            {
+                currentSampleLength++; // continue current streak
+            }
+            else
+            {
+                // failure → store the finished sample
+                if (currentSampleLength > 0)
+                {
+                    rollingSamples.Enqueue(currentSampleLength);
+                    if (rollingSamples.Count > rollingWindowSize)
+                        rollingSamples.Dequeue();
+                }
+
+                currentSampleLength = 0; // reset for next sample
+            }
+
+            previousDigit = lastDigit;
+
+            // Run deep analysis
+            DIGIT_Brain_Samples();
+
+            // --- Clear console and print dashboard ---
+            Console.Clear();
+            PrintTitleHeader();
+            Console.ForegroundColor = ConsoleColor.White;
+            Console.WriteLine($"Market\t\t: {marketNames[selectedMarket]}");
+            Console.WriteLine($"Type\t\t: {selectedType}");
+
+            if (selectedDigit == -1)
+                Console.WriteLine("Digit\t\t: NULL");
+            else
+                Console.WriteLine($"Digit\t\t: {selectedDigit}");
+
+            Console.WriteLine($"Rolling Size\t: {rollingWindowSize}");
+            Console.WriteLine($"Current Price\t: {priceStr}");
+            Console.WriteLine($"Last Digit\t: {lastDigit}");
+            Console.WriteLine($"Outcome\t\t: {outcomeLabel}");
+            Console.WriteLine($"Current Streak\t: {currentSampleLength}");
+
+            // --- Digit display ---
+            Console.WriteLine("\n[DIGIT]-Display");
+            Console.WriteLine(new string('=', 50));
+
+            for (int i = 0; i <= 9; i++)
+            {
+                if (selectedDigit == -1)
+                {
+                    // EVEN/ODD mode coloring
+                    Console.ForegroundColor = (i % 2 == 0) ? ConsoleColor.Green : ConsoleColor.Magenta;
+                }
+                else
+                {
+                    // Normal mode coloring
+                    Console.ForegroundColor = (i == selectedDigit) ? ConsoleColor.Yellow : ConsoleColor.White;
+                }
+
+                Console.Write($" {i} ");
+            }
+            Console.WriteLine();
+            Console.ResetColor();
+
+            // --- Pointer for last digit ---
+            for (int i = 0; i <= 9; i++)
+            {
+                Console.ForegroundColor = (i == lastDigit) ? ConsoleColor.Cyan : ConsoleColor.White;
+                Console.Write(i == lastDigit ? " ^ " : "   ");
+            }
+            Console.WriteLine();
+            Console.ResetColor();
+
+            //--- Rolling [N]-Sample Window ---
+            Console.ForegroundColor = ConsoleColor.White;
+
+            Console.WriteLine("==================================================");
+            Console.WriteLine("Rolling [SAMPLES]");
+            Console.WriteLine("==================================================");
+
+            // Set the fixed display size to 20
+            int displaySize = 20;
+            int index = 1;
+
+            // Use a queue to maintain the last 20 indices (rolling display window)
+            Queue<int> sampleQueue = new Queue<int>();
+
+            // Add the existing rolling samples to the queue (if there are any)
+            foreach (var sample in rollingSamples)
+            {
+                sampleQueue.Enqueue(sample);
+            }
+
+            // If there are more than 20 samples, dequeue the oldest ones
+            while (sampleQueue.Count > displaySize)
+            {
+                sampleQueue.Dequeue();
+            }
+
+            // If there are fewer than 20 samples, pad with empty slots
+            while (sampleQueue.Count < displaySize)
+            {
+                sampleQueue.Enqueue(-1);  // Or use a placeholder value like -1 for empty slots
+            }
+
+            // Display the last 20 samples
+            foreach (var sample in sampleQueue)
+            {
+                if (sample == -1)
+                {
+                    Console.WriteLine($"SAMPLE {index++}: <Empty>");
+                }
+                else
+                {
+                    Console.WriteLine($"SAMPLE {index++}: {sample}");
+                }
+            }
+
+            Console.WriteLine("==================================================");
+
+            // --- Print metrics ---
+            PrintMetrics_Digits_Samples(); // or general metrics method
+
+            // --- Key press for returning to main menu ---
+
+            Console.ForegroundColor = ConsoleColor.White;
+            Console.WriteLine("\nPress [ANY-KEY] to return to [MAIN]-Menu...\n");
+            if (Console.KeyAvailable)
+            {
+                Console.ReadKey(true); // consume the key without showing it
+                ReturnToMainMenu();
+            }
+        }
+
+        private static void ReturnToMainMenu()
+        {
+            Console.Clear();
+            Console.WriteLine("\nRestarting the TOOL and returning to [MAIN]-Menu...\n");
+            Thread.Sleep(700);
+
+            // 🔹 Kill current process and start a new one (same executable)
+            var exePath = Process.GetCurrentProcess().MainModule.FileName;
+            Process.Start(exePath);
+
+            // Exit this instance immediately
+            Environment.Exit(0);
+        }//ReturnToMainMenu
+
+        private static void PrintMetrics_Digits_Manual()
+        {
+            Console.ForegroundColor = ConsoleColor.White;
+
+            Console.WriteLine("\n[ANALYTICS] — ROLLING DASHBOARD");
+            Console.WriteLine("==================================================");
+
+            // ✅ Check if analysis data is available
+            if (lastAnalysis_Manual == null || lastAnalysis_Manual.Probabilities == null)
+            {
+                Console.WriteLine("No recent analysis data available yet...");
+                Console.WriteLine("==================================================");
+                return;
+            }
+
+            // === Display [CORE] analytics ===
+            Console.WriteLine($"P(next TICK) = {lastAnalysis_Manual.TraderProbability:P2}");
+            Console.ForegroundColor = ConsoleColor.White;
+            Console.WriteLine("--------------------------------------------------");
+            // === TRADE mode summary ===
+            Console.ForegroundColor = ConsoleColor.White;
+
+            // Build key (TYPE-DIGIT or just TYPE for non-digit modes)
+            string edgeKey = selectedType.ToUpper();
+            if (selectedType.Equals("OVER", StringComparison.OrdinalIgnoreCase) ||
+                selectedType.Equals("UNDER", StringComparison.OrdinalIgnoreCase) ||
+                selectedType.Equals("MATCHES", StringComparison.OrdinalIgnoreCase) ||
+                selectedType.Equals("DIFFERS", StringComparison.OrdinalIgnoreCase))
+            {
+                edgeKey = $"{selectedType.ToUpper()}-{selectedDigit}";
+            }
+
+            // Look up trader’s edge threshold
+            double edgeThreshold = HardcodedEdgeThresholds.ContainsKey(edgeKey) ? HardcodedEdgeThresholds[edgeKey] : 0.0; // default if not found
+
+            // Retrieve current probability
+            double traderProb = lastAnalysis_Manual.TraderProbability;
+
+            // Evaluate edge
+            bool hasEdge = traderProb >= edgeThreshold;
+
+            // === Trade Mode Message ===
+            string tradeModeMsg = hasEdge ? $"[EDGE] PREDICT ({selectedType})" : $"NO [EDGE] (DO NOT TRADE)";
+
+            Console.ForegroundColor = hasEdge ? ConsoleColor.Green : ConsoleColor.Red;
+            Console.WriteLine($"[TRADE]-Mode: {tradeModeMsg}");
+            Console.ResetColor();
+            Console.ForegroundColor = ConsoleColor.White;
+            Console.WriteLine("==================================================");
+
+        }
+        private static void PrintMetrics_Digits_Samples()
+        {
+            Console.ForegroundColor = ConsoleColor.White;
+            Console.WriteLine("\n[ANALYTICS] — ROLLING DASHBOARD");
+            Console.WriteLine("==================================================");
+
+            // ✅ Check if analysis data is available
+            if (lastAnalysis_Samples == null || lastAnalysis_Samples.Probabilities == null)
+            {
+                Console.WriteLine("No recent analysis data available yet...");
+                Console.WriteLine("==================================================");
+                return;
+            }
+
+            // 🔹 Probability of Sample > 1
+            double pSample2 = lastAnalysis_Samples.TraderProbability;
+            Console.WriteLine($"P(Sample>1)\t: {pSample2:P2}");
+            Console.WriteLine("--------------------------------------------------");
+
+            // === Trade Mode Edge ===
+            string edgeKey = selectedType.ToUpper();
+            if (selectedType.Equals("OVER", StringComparison.OrdinalIgnoreCase) ||
+                selectedType.Equals("UNDER", StringComparison.OrdinalIgnoreCase) ||
+                selectedType.Equals("MATCHES", StringComparison.OrdinalIgnoreCase) ||
+                selectedType.Equals("DIFFERS", StringComparison.OrdinalIgnoreCase))
+            {
+                edgeKey = $"{selectedType.ToUpper()}-{selectedDigit}";
+            }
+
+            double edgeThreshold = HardcodedEdgeThresholds.ContainsKey(edgeKey) ? HardcodedEdgeThresholds[edgeKey] : 0.0;
+
+            bool hasEdge = pSample2 <= edgeThreshold;
+            string tradeModeMsg = hasEdge ? $"[EDGE]" : $"NO [EDGE] (DO NOT TRADE)";
+
+            Console.ForegroundColor = hasEdge ? ConsoleColor.Green : ConsoleColor.Red;
+            Console.WriteLine($"[TRADE]-Mode: {tradeModeMsg}");
+            Console.ResetColor();
+            Console.WriteLine("==================================================");
+
+           //[ENTRY]-Rules
+            if (hasEdge)
+            {
+                Console.ForegroundColor = ConsoleColor.White;
+                Console.WriteLine($"\n[ENTRY]-Rules");
+                Console.WriteLine("==================================================");
+
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.WriteLine($"Step 1: WAIT until CURRENT STREAK = 1");
+                Console.WriteLine($"Step 2: PREDICT [{selectedType}] for the [WIN]");
+                Console.WriteLine($"Step 3: AFTER TRADE, RESET and wait for the next streak = 1");
+
+                Console.ForegroundColor = ConsoleColor.White;
+                Console.WriteLine("==================================================");
+            }
+            Console.ResetColor();
+
+            Console.ForegroundColor = ConsoleColor.White;
+        }
+
+        #endregion --- Analytics & [Trade]-Mode ---
+
+        #region --- [QUANTUM]-Sweep ---
+
+        private static async Task RunQuantumAnalysis_Manual()
+        {
+            const int defaultRollingWindow = 100; // last [N]-Digits
+
+            while (true)
+            {
+                Console.Write("Enter mode (OVER-digit | UNDER-digit | EVEN | ODD | MATCHES-digit | DIFFERS-digit): ");
+                string input = ReadUserCommand();
+                if (string.Equals(input, "C", StringComparison.OrdinalIgnoreCase)) { Environment.Exit(0); return; }
+                if (string.Equals(input, "M", StringComparison.OrdinalIgnoreCase)) return;
+                if (string.IsNullOrWhiteSpace(input)) { Console.WriteLine("Please enter a valid type."); continue; }
+
+                input = input.Trim().ToUpper();
+                string qType = input;
+                int qDigit = -1;
+
+                // Parse types that require a digit
+                if (qType.StartsWith("OVER-") || qType.StartsWith("UNDER-") ||
+                    qType.StartsWith("MATCHES-") || qType.StartsWith("DIFFERS-"))
+                {
+                    var parts = qType.Split('-');
+                    if (parts.Length != 2 || !int.TryParse(parts[1], out qDigit) || qDigit < 0 || qDigit > 9)
+                    {
+                        Console.WriteLine("Use OVER-<digit>, UNDER-<digit>, MATCHES-<digit>, or DIFFERS-<digit> (digit 0–9).");
+                        continue;
+                    }
+                    qType = parts[0]; // "OVER", "UNDER", "MATCHES", or "DIFFERS"
+                }
+                else if (!HardcodedEdgeThresholds.ContainsKey(qType))
+                {
+                    Console.WriteLine("Invalid type. Allowed: OVER-0..9, UNDER-0..9, EVEN, ODD, MATCHES-0..9, DIFFERS-0..9.");
+                    continue;
+                }
+
+                Console.WriteLine($"\n[QUANTUM]-Analysis scanning all markets for {qType}" +
+                                  (qDigit >= 0 ? $"-{qDigit}" : "") + "...\n");
+
+                var matchingMarkets = new List<(string marketKey, string label, double prob)>();
+
+                foreach (var marketKey in marketNames.Keys)
+                {
+                    try
+                    {
+                        selectedMarket = marketKey;
+                        selectedType = qType;
+                        selectedDigit = qDigit;
+                        rollingWindowSize = defaultRollingWindow;
+                        rollingDigits = null;
+
+                        await FillRollingWindowFromHistory_Manual();
+
+                        DIGIT_Brain_Manual(); // Updates lastAnalysis
+                        if (lastAnalysis_Manual?.Probabilities == null || lastAnalysis_Manual.Probabilities.Length != 10)
+                        {
+                            Console.WriteLine($"  -> {marketNames[marketKey],-20} ({marketKey}) | Invalid data.");
+                            continue;
+                        }
+
+                        double prob = 0.0;
+                        string label = "";
+
+                        switch (qType)
+                        {
+                            case "EVEN":
+                                prob = lastAnalysis_Manual.Probabilities.Where((p, i) => i % 2 == 0).Sum();
+                                label = "EVEN";
+                                break;
+
+                            case "ODD":
+                                prob = lastAnalysis_Manual.Probabilities.Where((p, i) => i % 2 != 0).Sum();
+                                label = "ODD";
+                                break;
+
+                            case "MATCHES":
+                                int lastDigitM = (qDigit >= 0) ? qDigit : (previousDigit ?? 0);
+                                prob = lastAnalysis_Manual.Probabilities[lastDigitM];
+                                label = $"MATCHES-{lastDigitM}";
+                                break;
+
+                            case "DIFFERS":
+                                int lastDigitD = (qDigit >= 0) ? qDigit : (previousDigit ?? 0);
+                                prob = 1.0 - lastAnalysis_Manual.Probabilities[lastDigitD];
+                                label = $"DIFFERS-{lastDigitD}";
+                                break;
+
+                            case "OVER":
+                                prob = lastAnalysis_Manual.Probabilities.Skip(qDigit + 1).Sum();
+                                label = $"OVER-{qDigit}";
+                                break;
+
+                            case "UNDER":
+                                prob = lastAnalysis_Manual.Probabilities.Take(qDigit).Sum();
+                                label = $"UNDER-{qDigit}";
+                                break;
+                        }
+
+                        // 🔑 Build correct edge key for lookup
+                        string edgeKey;
+                        if (qType == "OVER" || qType == "UNDER")
+                        {
+                            edgeKey = qType + "-" + qDigit;
+                        }
+                        else if (qType == "MATCHES" || qType == "DIFFERS")
+                        {
+                            int effectiveDigit = (qDigit >= 0) ? qDigit : (previousDigit ?? 0);
+                            edgeKey = qType + "-" + effectiveDigit;
+                        }
+                        else
+                        {
+                            edgeKey = qType; // EVEN, ODD
+                        }
+
+                        // Fetch edge threshold safely
+                        double edgeThreshold = HardcodedEdgeThresholds.ContainsKey(edgeKey)
+                            ? HardcodedEdgeThresholds[edgeKey]
+                            : 0.0;
+
+                        // Compare probabilities
+                        if (prob >= edgeThreshold)
+                        {
+                            matchingMarkets.Add((marketKey, label, prob));
+                            Console.ForegroundColor = ConsoleColor.Green;
+                            Console.WriteLine($"  -> {marketNames[marketKey],-20} ({marketKey}) | {label,-15} | P = {prob * 100:F2}%");
+                            Console.ResetColor();
+                        }
+                        else
+                        {
+                            Console.WriteLine($"  -> {marketNames[marketKey],-20} ({marketKey}) | No [EDGE] found ({prob * 100:F2}%).");
+                        }
+
+                        await Task.Delay(120);
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Error scanning {marketKey}: {ex.Message}");
+                    }
+                }
+
+                // === Display summary ===
+                if (!matchingMarkets.Any())
+                {
+                    Console.WriteLine("\nNo MARKETS currently meet the [EDGE].");
+                    Console.WriteLine("\nPress M to return to [Main]-Menu.");
+                    string c = ReadUserCommand();
+                    if (string.Equals(c, "M", StringComparison.OrdinalIgnoreCase)) return;
+                    continue;
+                }
+
+                matchingMarkets = matchingMarkets.OrderByDescending(m => m.prob).ToList();
+                Console.WriteLine("\nMarkets in [EDGE]-Condition:\n");
+                Console.WriteLine($"{"#",3} {"Market",-20} {"Key",-10} {"Edge",-15} {"Prob %",12}");
+                Console.WriteLine(new string('-', 60));
+
+                int index = 1;
+                foreach (var m in matchingMarkets)
+                    Console.WriteLine($"{index++,3} {marketNames[m.marketKey],-20} {m.marketKey,-10} {m.label,-15} {m.prob * 100,11:F2}%");
+
+                Console.Write("\nEnter market number to start trading or MENU to return: ");
+                string choice = ReadUserCommand();
+                if (string.Equals(choice, "M", StringComparison.OrdinalIgnoreCase)) return;
+                if (string.Equals(choice, "C", StringComparison.OrdinalIgnoreCase)) { Environment.Exit(0); return; }
+
+                if (int.TryParse(choice, out int selIndex) && selIndex >= 1 && selIndex <= matchingMarkets.Count)
+                {
+                    var selected = matchingMarkets[selIndex - 1];
+                    selectedMarket = selected.marketKey;
+                    selectedType = qType;
+                    selectedDigit = qDigit;
+
+                    rollingDigits = null;
+                    await FillRollingWindowFromHistory_Manual();
+                    await RunWebSocket_Manual();
+                    return;
+                }
+                else
+                {
+                    Console.WriteLine("Invalid selection. Returning to main menu.");
+                    return;
+                }
+            }
+        }
+        private static async Task RunQuantumAnalysis_Samples()
+        {
+            const int defaultRollingSamples = 20; // last [N]-Samples
+
+            while (true)
+            {
+                Console.Write("Enter mode (OVER-<digit> | UNDER-<digit> | EVEN | ODD | MATCHES-<digit> | DIFFERS-<digit>): ");
+                string input = ReadUserCommand();
+                if (string.Equals(input, "C", StringComparison.OrdinalIgnoreCase)) { Environment.Exit(0); return; }
+                if (string.Equals(input, "M", StringComparison.OrdinalIgnoreCase)) return;
+                if (string.IsNullOrWhiteSpace(input)) { Console.WriteLine("Please enter a valid type."); continue; }
+
+                input = input.Trim().ToUpper();
+                string qType = input;
+                int qDigit = -1;
+
+                // Parse types that require a digit
+                if (qType.StartsWith("OVER-") || qType.StartsWith("UNDER-") ||
+                    qType.StartsWith("MATCHES-") || qType.StartsWith("DIFFERS-"))
+                {
+                    var parts = qType.Split('-');
+                    if (parts.Length != 2 || !int.TryParse(parts[1], out qDigit) || qDigit < 0 || qDigit > 9)
+                    {
+                        Console.WriteLine("Use OVER-<digit>, UNDER-<digit>, MATCHES-<digit>, or DIFFERS-<digit> (digit 0–9).");
+                        continue;
+                    }
+                    qType = parts[0]; // "OVER", "UNDER", "MATCHES", or "DIFFERS"
+                }
+                else if (!(qType == "EVEN" || qType == "ODD" || HardcodedEdgeThresholds.ContainsKey(qType)))
+                {
+                    Console.WriteLine("Invalid type. Allowed: OVER-0..9, UNDER-0..9, EVEN, ODD, MATCHES-0..9, DIFFERS-0..9.");
+                    continue;
+                }
+
+                Console.WriteLine($"\n[QUANTUM]-Analysis scanning all markets for {qType}" + (qDigit >= 0 ? $"-{qDigit}" : "") + "...\n");
+
+                var matchingMarkets = new List<(string marketKey, string label, double prob)>();
+
+                foreach (var marketKey in marketNames.Keys)
+                {
+                    try
+                    {
+                        // set scan settings and reset sample window
+                        selectedMarket = marketKey;
+                        selectedType = qType;
+                        selectedDigit = qDigit;
+                        rollingWindowSize = defaultRollingSamples;
+                        rollingSamples = null;
+                        currentSampleLength = 0;
+
+                        // populate rollingSamples according to trader settings (history -> samples)
+                        await FillRollingWindowFromHistory_Samples();
+
+                        // compute sample brain (should set TraderProbability_Samples = P(Sample>1))
+                        DIGIT_Brain_Samples();
+
+                        double prob = lastAnalysis_Samples?.TraderProbability ?? 0.0;
+                        string label = "P(Sample>1)";
+
+                        // Build correct edge key for lookup
+                        string edgeKey;
+                        if (qType == "OVER" || qType == "UNDER")
+                        {
+                            edgeKey = qType + "-" + qDigit;
+                        }
+                        else if (qType == "MATCHES" || qType == "DIFFERS")
+                        {
+                            int effectiveDigit = (qDigit >= 0) ? qDigit : (previousSample.HasValue ? previousSample.Value : 0); edgeKey = qType + "-" + effectiveDigit;
+                        }
+                        else
+                        {
+                            edgeKey = qType; // EVEN, ODD
+                        }
+
+                        // Fetch edge threshold safely
+                        double edgeThreshold = HardcodedEdgeThresholds.ContainsKey(edgeKey) ? HardcodedEdgeThresholds[edgeKey] : 0.0;
+
+                        // Compare probabilities
+                        if (prob >= edgeThreshold)
+                        {
+                            matchingMarkets.Add((marketKey, label, prob));
+                            Console.ForegroundColor = ConsoleColor.Green;
+                            Console.WriteLine($"  -> {marketNames[marketKey],-20} ({marketKey}) | {label,-15} | P = {prob * 100:F2}%");
+                            Console.ResetColor();
+                        }
+                        else
+                        {
+                            Console.WriteLine($"  -> {marketNames[marketKey],-20} ({marketKey}) | No [EDGE] found ({prob * 100:F2}%).");
+                        }
+
+                        await Task.Delay(120);
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Error scanning {marketKey}: {ex.Message}");
+                    }
+                }
+
+                // === Display summary ===
+                if (!matchingMarkets.Any())
+                {
+                    Console.WriteLine("\nNo MARKETS currently meet the [EDGE].");
+                    Console.WriteLine("\nPress M to return to [Main]-Menu.");
+                    string c = ReadUserCommand();
+                    if (string.Equals(c, "M", StringComparison.OrdinalIgnoreCase)) return;
+                    continue;
+                }
+
+                matchingMarkets = matchingMarkets.OrderByDescending(m => m.prob).ToList();
+                Console.WriteLine("\nMarkets in [EDGE]-Condition:\n");
+                Console.WriteLine($"{"#",3} {"Market",-20} {"Key",-10} {"Edge",-15} {"Prob %",12}");
+                Console.WriteLine(new string('-', 60));
+
+                int index = 1;
+                foreach (var m in matchingMarkets)
+                    Console.WriteLine($"{index++,3} {marketNames[m.marketKey],-20} {m.marketKey,-10} {m.label,-15} {m.prob * 100,11:F2}%");
+
+                Console.Write("\nEnter market number to start trading or MENU to return: ");
+                string choice = ReadUserCommand();
+                if (string.Equals(choice, "M", StringComparison.OrdinalIgnoreCase)) return;
+                if (string.Equals(choice, "C", StringComparison.OrdinalIgnoreCase)) { Environment.Exit(0); return; }
+
+                if (int.TryParse(choice, out int selIndex) && selIndex >= 1 && selIndex <= matchingMarkets.Count)
+                {
+                    var selected = matchingMarkets[selIndex - 1];
+                    selectedMarket = selected.marketKey;
+                    selectedType = qType;
+                    selectedDigit = qDigit;
+
+                    rollingSamples = null;
+                    await FillRollingWindowFromHistory_Samples();
+                    await RunWebSocket_Samples();
+                    return;
+                }
+                else
+                {
+                    Console.WriteLine("Invalid selection. Returning to main menu.");
+                    return;
+                }
+            }
+        }
+
+
+        #endregion --- [QUANTUM]-Sweep ---
+
+        #region --- [STRATEGY]-Backtest ----
+
+        private static async Task StrategyBacktest_Samples()
+        {
+            Console.Clear();
+            PrintTitleHeader();
+            PrintTOOLScreenDescription("[STRATEGY]-Backtest", "Simulates strategy edge based on 10,000+ historical samples and account results.");
+
+            Console.WriteLine("\n[STRATEGY]-Backtest loading...");
+
+            // --- Request historical ticks ---
+            var url = new Uri("wss://ws.derivws.com/websockets/v3?app_id=1089");
+
+            using (ClientWebSocket ws = new ClientWebSocket())
+            {
+                await ws.ConnectAsync(url, CancellationToken.None);
+
+                string historyRequest = $@"{{
+                ""ticks_history"": ""{selectedMarket}"",
+                ""end"": ""latest"",
+                ""count"": ""100000"",
+                ""style"": ""ticks""
+                }}";
+
+                await ws.SendAsync(
+                    new ArraySegment<byte>(Encoding.UTF8.GetBytes(historyRequest)),
+                    WebSocketMessageType.Text,
+                    true,
+                    CancellationToken.None
+                );
+
+                string message = await ReceiveFullMessage(ws);
+                JObject json = JObject.Parse(message);
+
+                if (json["history"]?["prices"] == null)
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine("Failed to retrieve historical data.");
+                    Console.ResetColor();
+                    return;
+                }
+
+                var prices = json["history"]["prices"].Select(p => (decimal)p).ToList();
+                int dps = marketDecimalPlaces.ContainsKey(selectedMarket) ? marketDecimalPlaces[selectedMarket] : 2;
+
+                // --- Build samples (lengths of consecutive 'success' digits) ---
+                List<int> samples = new List<int>();
+                int currentSampleLength = 0;
+
+                foreach (var price in prices)
+                {
+                    string priceStr = price.ToString($"F{dps}");
+                    int lastDigit = int.Parse(priceStr[priceStr.Length - 1].ToString());
+
+                    if (IsSuccess(lastDigit))
+                        currentSampleLength++;
+                    else
+                    {
+                        if (currentSampleLength > 0)
+                        {
+                            samples.Add(currentSampleLength);
+                            currentSampleLength = 0;
+                        }
+                    }
+                }
+
+                // Ensure we have enough samples
+                if (samples.Count <= 500)
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine($"Not enough samples ({samples.Count}). Try fetching more history.");
+                    Console.ResetColor();
+                    Console.ReadKey();
+                    return;
+                }
+
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.WriteLine($"Retrieved {samples.Count} samples for backtest.");
+                Console.ResetColor();
+
+                // --- Ask trader inputs ---
+                Console.Write("\nEnter account size (USD): ");
+                double accountSize = 100.0;
+                try { accountSize = double.Parse(Console.ReadLine() ?? "100"); } catch { accountSize = 100.0; }
+
+                Console.Write("Enter stake size (USD): ");
+                double stake = 1.0;
+                try { stake = double.Parse(Console.ReadLine() ?? "1"); } catch { stake = 1.0; }
+
+                // --- Profit table (normalized for $1 stake) ---
+                Dictionary<string, double> profitTable = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase)
+                {
+                    {"OVER-0", 0.06}, {"OVER-1", 0.19}, {"OVER-2", 0.35},
+                    {"OVER-3", 0.56}, {"OVER-4", 0.845}, {"OVER-5", 1.26},
+                    {"OVER-6", 1.925}, {"OVER-7", 3.13}, {"OVER-8", 6.04},
+                    {"UNDER-9", 0.06}, {"UNDER-8", 0.19}, {"UNDER-7", 0.35},
+                    {"UNDER-6", 0.56}, {"UNDER-5", 0.845}, {"UNDER-4", 1.26},
+                    {"UNDER-3", 1.925}, {"UNDER-2", 3.13}, {"UNDER-1", 6.04}
+                };
+
+                double profitPerWin = profitTable.ContainsKey(selectedType) ? profitTable[selectedType] * stake : 0.19 * stake;
+
+                // --- Baseline Simulation: predict sample = 1 ---
+                int baselineWins = samples.Count(s => s == 1);
+                int baselineLosses = samples.Count - baselineWins;
+                double baselineWinRate = (double)baselineWins / samples.Count * 100.0;
+
+                double baselineProfit = baselineWins * profitPerWin - baselineLosses * stake;
+
+                // --- Strategy Simulation (REPLACEMENT) ---
+                // We'll iterate through samples using an index and perform pairs of evaluations:
+                // 1) predict current == 1
+                // 2) scan forward to first sample > 1 and predict it == 2 (win if exactly 2, loss if >2)
+                // Then continue from the element after that >1 sample.
+                double account = accountSize;
+                double peak = account;
+                double maxDrawdown = 0.0;
+                int strategyWins = 0;
+                int strategyLosses = 0;
+
+                List<int> winStreaks = new List<int>();
+                List<int> lossStreaks = new List<int>();
+                int currentWinStreak = 0;
+                int currentLossStreak = 0;
+
+                int i = 0;
+                while (i < samples.Count)
+                {
+                    // --- 1) Predict sample == 1 at position i ---
+                    bool tradeWin = (samples[i] == 1);
+                    // record trade
+                    if (tradeWin)
+                    {
+                        strategyWins++;
+                        account += profitPerWin;
+                        currentWinStreak++;
+                        if (currentLossStreak > 0) { lossStreaks.Add(currentLossStreak); currentLossStreak = 0; }
+                    }
+                    else
+                    {
+                        strategyLosses++;
+                        account -= stake;
+                        currentLossStreak++;
+                        if (currentWinStreak > 0) { winStreaks.Add(currentWinStreak); currentWinStreak = 0; }
+                    }
+
+                    // update peak / drawdown
+                    if (account > peak) peak = account;
+                    double ddNow = peak - account;
+                    if (ddNow > maxDrawdown) maxDrawdown = ddNow;
+
+                    // --- 2) Scan forward from i+1 to find first sample > 1 ---
+                    int j = i + 1;
+                    while (j < samples.Count && samples[j] == 1) j++;
+
+                    // if we reached end, there is no following >1 to evaluate => break out
+                    if (j >= samples.Count) break;
+
+                    // Evaluate the found sample (>1)
+                    int found = samples[j];
+                    bool trade2Win = (found == 2); // win only if exactly 2, loss if >2
+
+                    if (trade2Win)
+                    {
+                        strategyWins++;
+                        account += profitPerWin;
+                        currentWinStreak++;
+                        if (currentLossStreak > 0) { lossStreaks.Add(currentLossStreak); currentLossStreak = 0; }
+                    }
+                    else
+                    {
+                        strategyLosses++;
+                        account -= stake;
+                        currentLossStreak++;
+                        if (currentWinStreak > 0) { winStreaks.Add(currentWinStreak); currentWinStreak = 0; }
+                    }
+
+                    // update peak / drawdown again
+                    if (account > peak) peak = account;
+                    ddNow = peak - account;
+                    if (ddNow > maxDrawdown) maxDrawdown = ddNow;
+
+                    // Move index to element after the evaluated >1 sample
+                    i = j + 1;
+                }
+
+                // push final streaks if any
+                if (currentWinStreak > 0) winStreaks.Add(currentWinStreak);
+                if (currentLossStreak > 0) lossStreaks.Add(currentLossStreak);
+
+                double strategyWinRate = (strategyWins + strategyLosses) > 0
+                    ? (double)strategyWins / (strategyWins + strategyLosses) * 100.0
+                    : 0.0;
+                double netProfit = account - accountSize;
+
+                // --- Summary Output ---
+                Console.ForegroundColor = ConsoleColor.Cyan;
+                Console.WriteLine("\n==================================================");
+                Console.WriteLine("[STRATEGY]-BACKTEST SUMMARY");
+                Console.WriteLine("==================================================");
+                Console.ForegroundColor = ConsoleColor.White;
+
+                Console.WriteLine($"Samples simulated: {samples.Count:N0}");
+                Console.WriteLine($"Baseline win-rate: {baselineWinRate:F2}%");
+                Console.WriteLine($"Strategy win-rate: {strategyWinRate:F2}%");
+                Console.WriteLine($"Account start:     ${accountSize:F2}");
+                Console.WriteLine($"Account end:       ${account:F2}");
+                Console.WriteLine($"Net Profit/Loss:   ${netProfit:F2}");
+                Console.WriteLine($"Max Drawdown:      ${maxDrawdown:F2}");
+
+                Console.WriteLine($"\nWin streaks -> Avg: {(winStreaks.Count > 0 ? winStreaks.Average().ToString("F2") : "0")}, " +
+                                  $"Max: {(winStreaks.Count > 0 ? winStreaks.Max() : 0)}, " +
+                                  $"Min: {(winStreaks.Count > 0 ? winStreaks.Min() : 0)}");
+
+                Console.WriteLine($"Loss streaks -> Avg: {(lossStreaks.Count > 0 ? lossStreaks.Average().ToString("F2") : "0")}, " +
+                                  $"Max: {(lossStreaks.Count > 0 ? lossStreaks.Max() : 0)}, " +
+                                  $"Min: {(lossStreaks.Count > 0 ? lossStreaks.Min() : 0)}");
+
+                Console.WriteLine("==================================================");
+
+                if (netProfit > 0)
+                {
+                    Console.ForegroundColor = ConsoleColor.Green;
+                    Console.WriteLine("Strategy shows an [EDGE] — profitable overall.");
+                }
+                else
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine("No [EDGE] — strategy not profitable.");
+                }
+            }
+
+            Console.ForegroundColor = ConsoleColor.White;
+            Console.WriteLine("\nPress [ANY-KEY] to return to [MAIN]-Menu...\n");
+            Console.ReadKey();
+        }
+
+        #endregion --- [STRATEGY]-Backtest ----
+
+        #region --- [TOOL]-Brain ---
+
+        private static void DIGIT_Brain_Manual()
+        {
+            if (rollingDigits == null || rollingDigits.Count == 0)
+                return;
+
+            int N = rollingDigits.Count;
+            var digitsArray = rollingDigits.ToArray();
+            if (N < 5) return;
+
+            // === 1. Frequency Analysis (P(digit)) ===
+            int[] freq = new int[10];
+            foreach (var d in digitsArray) freq[d]++;
+            double[] prob = freq.Select(f => (double)f / N).ToArray();
+
+            // === 2. Trader Prediction Probability ===
+            double traderProb = 0.0;
+
+            if (!string.IsNullOrEmpty(selectedType))
+            {
+                switch (selectedType.ToUpper())
+                {
+                    case "OVER":
+                        traderProb = prob.Select((v, i) => (i > selectedDigit) ? v : 0).Sum();
+                        break;
+
+                    case "UNDER":
+                        traderProb = prob.Select((v, i) => (i < selectedDigit) ? v : 0).Sum();
+                        break;
+
+                    case "MATCHES":
+                        traderProb = prob.Select((v, i) => (i == selectedDigit) ? v : 0).Sum();
+                        break;
+
+                    case "DIFFERS":
+                        traderProb = prob.Select((v, i) => (i != selectedDigit) ? v : 0).Sum();
+                        break;
+
+                    case "EVEN":
+                        traderProb = prob.Where((v, i) => i % 2 == 0).Sum();
+                        break;
+
+                    case "ODD":
+                        traderProb = prob.Where((v, i) => i % 2 == 1).Sum();
+                        break;
+                }
+            }
+
+            // === 3. Save result ===
+            lastAnalysis_Manual = new DigitAnalysisResult_Manual
+            {
+                WindowSize = N,
+                Probabilities = prob,
+                TraderProbability = traderProb,
+            };
+        }
+        private static void DIGIT_Brain_Samples()
+        {
+            if (rollingSamples == null || rollingSamples.Count == 0)
+                return;
+
+            int N = rollingSamples.Count;
+            var samplesArray = rollingSamples.ToArray();
+            if (N < 5) return;
+
+            // === 1. Count occurrences of Sample = 1 ===
+            int countSampleGt1 = samplesArray.Count(s => s > 1);
+
+            // === 2. Compute probability ===
+            double pSampleGt1 = (double)countSampleGt1 / N;
+
+            // === 3. Save result ===
+            lastAnalysis_Samples = new DigitAnalysisResult_Samples
+            {
+                WindowSize = N,
+                Probabilities = new double[] { pSampleGt1 },
+                TraderProbability = pSampleGt1
+            };
+        }
+
+        #endregion --- [TOOL]-Brain ---
+    }//Program
+}//_DIGIT__Sniper_TOOL
