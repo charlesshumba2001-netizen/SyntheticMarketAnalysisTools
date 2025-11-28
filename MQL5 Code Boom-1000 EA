@@ -1,0 +1,644 @@
+#include <Trade/Trade.mqh>
+
+#property copyright "Copyright 2024, MetaQuotes Ltd."
+#property link      "https://www.mql5.com"
+#property version   "1.00"
+
+/*******************************************************************************************************************************************************************/
+// [START]-UP VARIABLES
+/*******************************************************************************************************************************************************************/
+
+#define STREAK_SIZE 20
+int streaks[STREAK_SIZE];     // Rolling sample array
+int streak_filled = 0;        // Number of samples currently stored
+int streak_pos = 0;           // Position to insert new sample
+
+#define MAX_TRACKED_STREAK 10
+int freqBelow[MAX_TRACKED_STREAK + 1];
+int freqAbove[MAX_TRACKED_STREAK + 1];
+
+/*******************************************************************************************************************************************************************/
+
+double prob_streak_value = 0; // Rolling probability of streak < ANY LENGTH
+
+int increasing_total = 0;
+int increasing_wins = 0;
+
+int streaks_above_count = 0;
+int streaks_above_length = 0;
+int max_streaks_above = 0;
+
+int streaks_below_count = 0;
+int streaks_below_length = 0;
+int max_streaks_below = 0;
+
+bool prev_above = false;
+bool prev_below = false;
+
+int streaksBelow[];
+int streaksAbove[];
+
+//Streak Value Simulations
+int above_value = 10;//Streaks >= value
+int below_value = 9;//Streaks <= value
+
+int currentStreak = 0;
+bool lastWasBelow = false;
+bool firstSample = true;
+
+/*******************************************************************************************************************************************************************/
+// === HIGH LOT MANAGEMENT LOGIC ===
+input int MaxHighLotTradesV3 = 5;   // Number of high-lot trades before switching to low lot AND CHANGE THE VARIABLE_NAMES IF YOU WANT TO TEST DIFFERENT VALUES
+input double HighLotV3 = 5.0;
+input double LowLotV3 = 1.0;
+
+int highLotTradesUsed = 0;
+bool inLowLotPhase = false;
+bool lossOccurred = false;
+bool waitingForWin = false;
+datetime lastKnownDealTime = 0;
+
+/*******************************************************************************************************************************************************************/
+//tick flag
+bool tick_tracking = false;
+
+//starting number of sample
+int TickCounter = 0;    //number of ticks in the sample
+int total_samples = 0;  //number of samples
+
+int trade_counter = 0;
+
+//Global scope
+datetime lastBarTime = 0;
+
+bool buy_trade_opened = false;            //this is a flag for trading conditions
+
+bool sell_trade_opened = false;            //this is a flag for trading conditions
+
+CTrade trade;                              //class for trading functions
+
+string setup_active = "[STRATEGY]-LOADING...";
+
+/*******************************************************************************************************************************************************************/
+
+int OnInit()
+{     
+    Print("⚙️ MaxHighLotTrades = ", MaxHighLotTradesV3);
+    Print("⚙️ HighLot = ", HighLotV3);
+    Print("⚙️ LowLot = ", LowLotV3);
+ 
+    return(INIT_SUCCEEDED);
+}//OnInit
+
+void OnDeinit(const int reason)
+{
+
+  
+}//OnDeinit
+
+/*******************************************************************************************************************************************************************/
+// [TRADING-CONTROL] && LOSS-TRADE TRACKER
+/*******************************************************************************************************************************************************************/
+
+//Number of trades taken per day
+datetime last_trade_time = 0;
+int daily_trade_count = 0;
+int max_trades_per_day = 100;  // Change as needed
+
+/*******************************************************************************************************************************************************************/
+
+double GetPercentile(int &data[], double percentile)
+{
+   if (ArraySize(data) == 0)
+      return 0;
+
+   int sorted[];
+   ArrayCopy(sorted, data);
+   ArraySort(sorted);
+
+   double idx = percentile * (ArraySize(sorted) - 1);
+   int i = (int)MathFloor(idx);
+   double frac = idx - i;
+
+   if (i + 1 < ArraySize(sorted))
+      return sorted[i] + frac * (sorted[i + 1] - sorted[i]);
+   else
+      return sorted[i];
+}
+
+/*******************************************************************************************************************************************************************/
+
+void UpdateLotState()
+{
+    datetime to_time = TimeCurrent();
+    datetime from_time = to_time - 60 * 60 * 24;
+
+    if (!HistorySelect(from_time, to_time)) return;
+
+    ulong latestDeal = 0;
+    datetime latestTime = 0;
+    double profit = 0;
+
+    for (int i = HistoryDealsTotal() - 1; i >= 0; i--)
+    {
+        ulong ticket = HistoryDealGetTicket(i);
+        if (HistoryDealSelect(ticket))
+        {
+            long type = HistoryDealGetInteger(ticket, DEAL_TYPE);
+            if (type == DEAL_TYPE_BUY || type == DEAL_TYPE_SELL)
+            {
+                datetime dealTime = (datetime)HistoryDealGetInteger(ticket, DEAL_TIME);
+                if (dealTime > latestTime)
+                {
+                    latestTime = dealTime;
+                    latestDeal = ticket;
+                    profit = HistoryDealGetDouble(ticket, DEAL_PROFIT);
+                }
+            }
+        }
+    }
+
+    if (latestTime == 0 || latestTime == lastKnownDealTime)
+        return; // No new trade found
+
+    lastKnownDealTime = latestTime;
+
+    PrintFormat("📊 Profit Check → profit=%.2f | inLowLotPhase=%s | lossOccurred=%s | waitingForWin=%s | highLotTradesUsed=%d",
+                profit,
+                (inLowLotPhase ? "true" : "false"),
+                (lossOccurred ? "true" : "false"),
+                (waitingForWin ? "true" : "false"),
+                highLotTradesUsed);
+
+    // Trade outcome evaluation
+    if (profit < 0)
+    {
+        lossOccurred = true;
+        waitingForWin = true;
+        highLotTradesUsed = MaxHighLotTradesV3; // block high-lots
+        inLowLotPhase = true;
+    }
+    else if (waitingForWin && profit > 0)
+    {
+        // Win after loss → reset
+        lossOccurred = false;
+        waitingForWin = false;
+        highLotTradesUsed = 0;
+        inLowLotPhase = false;
+    }
+    else if (!inLowLotPhase && profit > 0)
+    {
+        highLotTradesUsed++;
+        Print("🆙 Incrementing highLotTradesUsed → now: ", highLotTradesUsed);
+
+        if (highLotTradesUsed >= MaxHighLotTradesV3)
+        {
+            inLowLotPhase = true;
+        }
+    }
+}
+
+/*******************************************************************************************************************************************************************/
+
+void MoveStopLossToBreakEvenBuy()//Method to protect profits by moving trailing stop-loss
+{
+    for (int i = 0; i < PositionsTotal(); i++)
+    {
+        ulong ticket_buy = PositionGetTicket(i);
+        if (PositionSelectByTicket(ticket_buy) && PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
+        {
+            double entryPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+            double stopLoss = PositionGetDouble(POSITION_SL);
+            double tp = PositionGetDouble(POSITION_TP);
+            double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+            double profitPoints = (currentPrice - entryPrice) / _Point;
+
+            if (profitPoints >= 50000 && profitPoints < 500000)//Confirm the point-system with the market at hand
+            {
+                double newStopLoss = entryPrice + 50000 * _Point;//Confirm the point-system with the market at hand
+                if (stopLoss == 0.0 || newStopLoss > stopLoss)
+                {
+                    trade.PositionModify(ticket_buy, newStopLoss, tp);
+                }
+            }
+            else if (profitPoints >= 300000)//Confirm the point-system with the market at hand
+            {
+                double trailPoints = profitPoints * 0.60;//Confirm the point-system with the market at hand
+                double newStopLoss = entryPrice + trailPoints * _Point;
+                if (stopLoss == 0.0 || newStopLoss > stopLoss)
+                {
+                    trade.PositionModify(ticket_buy, newStopLoss, tp);
+                }
+            }
+        }
+    }
+}//MoveStopLossToBreakEvenBuy
+
+void MoveStopLossToBreakEvenSell()//Method to protect profits by moving trailing stop-loss
+{
+    for (int i = 0; i < PositionsTotal(); i++)
+    {
+        ulong ticket_sell = PositionGetTicket(i);
+        if (PositionSelectByTicket(ticket_sell) && PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_SELL)
+        {
+            double entryPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+            double stopLoss = PositionGetDouble(POSITION_SL);
+            double tp = PositionGetDouble(POSITION_TP);
+            double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+            double profitPoints = (entryPrice - currentPrice) / _Point;
+
+            if (profitPoints >= 4000 && profitPoints < 30000)//Confirm the point-system with the market at hand
+            {
+                double newStopLoss = entryPrice - 2000 * _Point;//Confirm the point-system with the market at hand
+                if (stopLoss == 0.0 || newStopLoss < stopLoss)
+                {
+                    trade.PositionModify(ticket_sell, newStopLoss, tp);
+                }
+            }
+            else if (profitPoints >= 20000)//Confirm the point-system with the market at hand
+            {
+                double trailPoints = profitPoints * 0.50;//Confirm the point-system with the market at hand
+                double newStopLoss = entryPrice - trailPoints * _Point;
+                if (stopLoss == 0.0 || newStopLoss < stopLoss)
+                {
+                    trade.PositionModify(ticket_sell, newStopLoss, tp);
+                }
+            }
+        }
+    }
+}//MoveStopLossToBreakEvenSell
+
+/*******************************************************************************************************************************************************************/
+
+string GetSetupMessage(bool _prev_above, int _currentStreak)
+{
+    if(prev_above && currentStreak == 4)
+        return "TAKE A QUICK [SCALP]...";
+    if(!prev_above && currentStreak == 2)
+        return "Enter to catch a [SPIKE]...";
+    if(prev_above && currentStreak == 5)
+        return "[Trade]-Complete. (Wait for Next Setup)...";
+    if(!prev_above && currentStreak == 3)
+        return "[Trade]-Complete. (Wait for Next Setup)...";
+    return "Waiting for [Trade]-Opportunity...";
+}
+
+/*******************************************************************************************************************************************************************/
+
+double GetLotSize(double riskPercent)
+{
+   double balance      = AccountInfoDouble(ACCOUNT_BALANCE);
+   double riskAmount   = balance * (riskPercent / 100.0);  // e.g., 0.25%
+   double tickValue    = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickSize     = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double lotStep      = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   double contractSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE);
+
+   double lotSize = (riskAmount / (tickValue / tickSize)) / contractSize;
+
+   // Round to nearest lot step
+   return MathFloor(lotSize / lotStep) * lotStep;
+}
+
+/*******************************************************************************************************************************************************************/
+
+void OnTick()
+{
+/*******************************************************************************************************************************************************************/
+// [TIME]-BASED VARIABLES
+/*******************************************************************************************************************************************************************/
+  
+    datetime currentBarTime = iTime(_Symbol, PERIOD_M1, 0);// Time of previous-tick  
+    
+    //storing the days variables
+    datetime current_time = TimeCurrent();
+    MqlDateTime current_date, last_trade_date;
+
+    TimeToStruct(current_time, current_date);
+    TimeToStruct(last_trade_time, last_trade_date);
+
+    // Reset [trade]-count if it's a new day
+    if (current_date.day != last_trade_date.day || current_date.mon != last_trade_date.mon || current_date.year != last_trade_date.year)
+    {
+        daily_trade_count = 0;
+    }//[TIME]-tracker
+    
+/*******************************************************************************************************************************************************************/
+// [TRADE]-MODIFICATIONS & [ACCOUNT]-MANAGEMENT
+/*******************************************************************************************************************************************************************/
+    
+    double current_balance       = AccountInfoDouble(ACCOUNT_BALANCE);
+    double equity                = AccountInfoDouble(ACCOUNT_EQUITY);
+    double freeMargin            = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+    double lot_size              = 0.5;    //GetLotSize(0.25);
+    
+//    UpdateLotState();  // Call it every tick to update status
+//
+//    lot_size = inLowLotPhase ? LowLotV3 : HighLotV3;
+
+
+    double AskPrice = NormalizeDouble(SymbolInfoDouble(_Symbol, SYMBOL_ASK), _Digits); //price at which you are placing your buy.
+    double BidPrice = NormalizeDouble(SymbolInfoDouble(_Symbol, SYMBOL_BID), _Digits); //price at which you are placing your sell.
+
+    //Buy
+    int points_takeprofit_buy    = 2500;           //Take-profit
+    int points_stoploss_buy      = 10000;          //Stop-loss
+    //Sell  
+    int points_takeprofit_sell   = 50000;          //Take-profit
+    int points_stoploss_sell     = 100000;         //Stop-loss
+    
+    //Buy
+    const double BUY_stop_loss = AskPrice - points_stoploss_buy * _Point;        //set the stop-loss of the trade.
+    const double BUY_take_profit = AskPrice + points_takeprofit_buy* _Point;     //set the take-profit of the trade.
+    //Sell
+    const double SELL_stop_loss = BidPrice + points_stoploss_sell * _Point;      //set the stop-loss of the trade.
+    const double SELL_take_profit = BidPrice - points_takeprofit_sell * _Point;  //set the take-profit of the trade.
+    
+/*******************************************************************************************************************************************************************/
+// [SAMPLE]-TRACKING LOGIC
+/*******************************************************************************************************************************************************************/
+    //candle-1 data
+    double candle_1close   =  iClose(_Symbol, _Period, 1);
+    double candle_1open    =  iOpen(_Symbol, _Period, 1);
+    
+    //Beginning of a [Tick]-candle
+    if(candle_1close < candle_1open)//[BEARISH]-CANDLE
+    {
+       if(!tick_tracking)
+       {
+          TickCounter++;//increments the number of ticks before a spike
+          lastBarTime = currentBarTime; //store the time of this bullish candle
+          total_samples++;
+          tick_tracking = true;
+       }
+                 
+       else if(currentBarTime != lastBarTime)//confirmation to check the next tick has started
+       {
+          TickCounter++;//increments the number of ticks before a spike
+          lastBarTime = currentBarTime; // Update last tracked time
+       }
+     }
+      
+     else if (tick_tracking)
+     {
+         // Save TickCounter into rolling streak array
+         streaks[streak_pos] = TickCounter;
+         streak_pos = (streak_pos + 1) % STREAK_SIZE;
+   
+         if (streak_filled < STREAK_SIZE)
+            streak_filled++;
+            
+         int currentSample = TickCounter;  // Or however you're accessing the current sample
+
+         if (firstSample)
+         {
+            currentStreak = 1;
+            lastWasBelow = (currentSample <= below_value);
+            firstSample = false;
+         }
+         else
+         {
+            bool isBelow = (currentSample <= below_value);
+            
+            if (isBelow == lastWasBelow)
+            {
+               currentStreak++;
+            }
+            
+            else
+            {
+                if (lastWasBelow)
+                {
+                    // Resize array for streaks below
+                    ArrayResize(streaksBelow, ArraySize(streaksBelow) + 1);
+                    streaksBelow[ArraySize(streaksBelow) - 1] = currentStreak; // Add current streak
+                    
+                    int capped = MathMin(currentStreak, MAX_TRACKED_STREAK);
+                    freqBelow[capped]++;
+                }
+                else
+                {
+                    // Resize array for streaks above
+                    ArrayResize(streaksAbove, ArraySize(streaksAbove) + 1);
+                    streaksAbove[ArraySize(streaksAbove) - 1] = currentStreak; // Add current streak
+                    
+                    int capped = MathMin(currentStreak, MAX_TRACKED_STREAK);
+                    freqAbove[capped]++;
+                }
+               
+                // Reset current streak counter
+                currentStreak = 1;
+                lastWasBelow = isBelow;
+            }
+         }
+         
+        tick_tracking = false;
+        TickCounter = 0;
+     }//[Tick]-Counter
+     
+/*******************************************************************************************************************************************************************/
+// [TRADING]-LOGIC
+/*******************************************************************************************************************************************************************/
+     MoveStopLossToBreakEvenBuy();
+     
+     if(prev_above && TickCounter == 1 && PositionsTotal() == 0 && !buy_trade_opened) //current streak = 1
+     {
+         //trade.Buy(lot_size, _Symbol, AskPrice, BUY_stop_loss, BUY_take_profit);//execution of the [Trade]
+         trade.Sell(lot_size, _Symbol, BidPrice, SELL_stop_loss, SELL_take_profit);//execution of the [Trade]
+         
+         buy_trade_opened = true;
+   
+         last_trade_time = current_time;//update the time the last trade was taken.
+            
+         daily_trade_count++;//increment the number of trades in the day so far.
+     }
+  
+     if(buy_trade_opened && PositionsTotal() == 0 && !prev_above)//reset Trade logic
+     {
+         buy_trade_opened = false;
+     }//[Setup-1]
+     
+/*******************************************************************************************************************************************************************/
+// [DISPLAY]-METRICS
+/*******************************************************************************************************************************************************************/
+
+      string sampleText = "";
+      int samplesToShow = MathMin(streak_filled, 20);  // limit display to last 10 samples
+      for(int i = streak_filled - samplesToShow; i < streak_filled; i++)
+      {
+          int idx = (streak_pos - streak_filled + i + STREAK_SIZE) % STREAK_SIZE;
+          sampleText += "\nSample " + IntegerToString(i + 1) + ": " + IntegerToString(streaks[idx]);
+      }
+   
+/*******************************************************************************************************************************************************************/      
+      double streak_avg = 0;
+
+      if (streak_filled > 0)
+      {
+          int sum = 0;
+          for (int i = 0; i < streak_filled; i++)
+          {
+              int idx = (streak_pos - streak_filled + i + STREAK_SIZE) % STREAK_SIZE;
+              sum += streaks[idx];
+          }
+          streak_avg = (double)sum / streak_filled;
+      }
+      
+/*******************************************************************************************************************************************************************/ 
+ 
+      // Calculate probability of streak >= ANY LENGTH
+      int short_count = 0;
+      for (int i = 0; i < streak_filled; i++)
+      {
+          int idx = (streak_pos - streak_filled + i + STREAK_SIZE) % STREAK_SIZE;
+          if (streaks[idx] >= 10)
+              short_count++;
+      }
+      
+      if (streak_filled > 0)
+          prob_streak_value = (double)short_count / streak_filled;
+          
+/*******************************************************************************************************************************************************************/         
+          
+      for (int i = 0; i < streak_filled - 2; i++)
+      {
+          int idx0 = (streak_pos - streak_filled + i + STREAK_SIZE) % STREAK_SIZE;
+          int idx1 = (idx0 + 1) % STREAK_SIZE;
+          int idx2 = (idx0 + 2) % STREAK_SIZE;
+      
+          int s0 = streaks[idx0];
+          int s1 = streaks[idx1];
+          int s2 = streaks[idx2];
+      
+          if (s0 < s1)  // increasing setup
+          {
+              increasing_total++;
+              if (s0 < s1 && s1 < s2)  // win condition
+                  increasing_wins++;
+          }
+      }
+      
+      double increasing_winrate = (increasing_total > 0) ? (double)increasing_wins / increasing_total : 0.0;
+      
+/*******************************************************************************************************************************************************************/
+
+if (streak_filled > 0)
+{
+    int last_idx = (streak_pos - 1 + STREAK_SIZE) % STREAK_SIZE;
+    int last_streak = streaks[last_idx];
+
+    // Track above streaks
+    if (last_streak >= above_value)
+    {
+        if (prev_above)
+            streaks_above_length++;
+        else
+            streaks_above_length = 1;
+
+        streaks_above_count++;
+        if (streaks_above_length > max_streaks_above)
+            max_streaks_above = streaks_above_length;
+
+        prev_above = true;
+        prev_below = false;
+    }
+    // Track below streaks
+    else
+    {
+        if (prev_below)
+            streaks_below_length++;
+        else
+            streaks_below_length = 1;
+
+        streaks_below_count++;
+        if (streaks_below_length > max_streaks_below)
+            max_streaks_below = streaks_below_length;
+
+        prev_below = true;
+        prev_above = false;
+    }
+}
+
+/*******************************************************************************************************************************************************************/
+
+double p70_below = GetPercentile(streaksBelow, 0.70);
+double p80_below = GetPercentile(streaksBelow, 0.80);
+double p90_below = GetPercentile(streaksBelow, 0.90);
+double p95_below = GetPercentile(streaksBelow, 0.95);
+double p98_below = GetPercentile(streaksBelow, 0.98);
+
+double p70_above = GetPercentile(streaksAbove, 0.70);
+double p80_above = GetPercentile(streaksAbove, 0.80);
+double p90_above = GetPercentile(streaksAbove, 0.90);
+double p95_above = GetPercentile(streaksAbove, 0.95);
+
+/*******************************************************************************************************************************************************************/
+
+string liveStreakText = "";
+
+if (prev_above)
+   liveStreakText = "Current >=" + IntegerToString(above_value) + " Streak: " + IntegerToString(currentStreak);
+else
+   liveStreakText = "Current >=" + IntegerToString(below_value) + " Streak: " + IntegerToString(currentStreak);
+   
+/*******************************************************************************************************************************************************************/
+
+setup_active = GetSetupMessage(prev_above, currentStreak);
+  
+/*******************************************************************************************************************************************************************/
+
+string freqText = "\n[Streak <= 9] Frequency:\n--------------------------------------";
+for (int i = 1; i < MAX_TRACKED_STREAK; i++)
+{
+   if (freqBelow[i] > 0)
+      freqText += "\n " + IntegerToString(i) + " → " + IntegerToString(freqBelow[i]) + "x";
+}
+if (freqBelow[MAX_TRACKED_STREAK] > 0)
+   freqText += "\n " + IntegerToString(MAX_TRACKED_STREAK) + "+ → " + IntegerToString(freqBelow[MAX_TRACKED_STREAK]) + "x";
+
+freqText += "\n\n[Streak >= 10] Frequency:\n--------------------------------------";
+for (int i = 1; i < MAX_TRACKED_STREAK; i++)
+{
+   if (freqAbove[i] > 0)
+      freqText += "\n " + IntegerToString(i) + " → " + IntegerToString(freqAbove[i]) + "x";
+}
+if (freqAbove[MAX_TRACKED_STREAK] > 0)
+   freqText += "\n " + IntegerToString(MAX_TRACKED_STREAK) + "+ → " + IntegerToString(freqAbove[MAX_TRACKED_STREAK]) + "x";
+   
+/*******************************************************************************************************************************************************************/
+  
+Comment( "\n[BOOM-1000]",
+         "\n===================\n",
+         "Total-Samples : ", total_samples,
+         "\n[Bearish]-Candles : ", TickCounter,
+         "\n--------------------------------------",
+         "\nRolling Streak Samples (Last ", streak_filled, "):", sampleText,
+         "\n===================",
+         //"\nPercentile Metrics",
+         //"\n---------------------------", 
+         //"\n[Streak <=" + IntegerToString(below_value) + "]",
+         //"\n---------------------------", 
+         //"\n70th Percentile : ", DoubleToString(p70_below, 2),
+         //"\n80th Percentile : ", DoubleToString(p80_below, 2),
+         //"\n90th Percentile : ", DoubleToString(p90_below, 2),
+         //"\n95th Percentile : ", DoubleToString(p95_below, 2),
+         //"\n98th Percentile : ", DoubleToString(p98_below, 2),
+         //"\n\n[Streak >=" + IntegerToString(above_value) + "]",
+         //"\n---------------------------", 
+         //"\n70th Percentile : ", DoubleToString(p70_above, 2),
+         //"\n80th Percentile : ", DoubleToString(p80_above, 2),
+         //"\n90th Percentile : ", DoubleToString(p90_above, 2),
+         //"\n95th Percentile : ", DoubleToString(p95_above, 2),
+         //"\nRolling Average (Streak) : ", DoubleToString(streak_avg, 2),
+         "\n\n",liveStreakText,
+         "\n---------------------------",
+         "\n[TRADE]-MODE : ", setup_active,
+         //"\n",freqText,
+         //"\nP(Streak >= 10)            : ", DoubleToString(prob_streak_value * 100, 2), "%",    
+         "\n================================\n"
+         //"[STRATEGY]-RULES",
+         //"\n-------------------------------------------\n
+         );
+                        
+/*******************************************************************************************************************************************************************/
+}
