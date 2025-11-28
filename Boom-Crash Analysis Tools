@@ -1,0 +1,592 @@
+/*Program-Name  : Boom-Crash [Data]-Analysis Tool
+ *Goal          : Analyse the [PRNG] Algorithm of the Market
+ *Purpose       : Create a very profitable scalping strategy that is [Data]-driven to make money !!!
+ */
+
+using DocumentFormat.OpenXml.Office2010.ExcelAc;
+using DocumentFormat.OpenXml.Wordprocessing;
+using MathNet.Numerics;
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+
+public class MarketSample 
+{ 
+    public int Ticks { get; set; } 
+    public int HourOfDay { get; set; } 
+    public int DayOfWeek { get; set; }
+}//MarketSample
+
+public static class MarketAnalyzer
+{
+    public static List<MarketSample> LoadData(string filePath)
+    {
+        var samples = new List<MarketSample>();
+        foreach (var line in File.ReadLines(filePath))
+        {
+            var parts = line.Split(',');
+            if (parts.Length >= 3 && int.TryParse(parts[0], out int ticks) && int.TryParse(parts[1], out int hour) && int.TryParse(parts[2], out int day))
+            {
+                samples.Add(new MarketSample { Ticks = ticks, HourOfDay = hour, DayOfWeek = day });
+            }
+        }
+
+        return samples;
+    }//LoadData
+
+    public static void IncreasingPatternWinRateCalculator(List<MarketSample> samples, int TPTicks, StreamWriter writer)
+    {
+        int totalPatterns = 0;
+        int successfulPatterns = 0;
+        var winsByHour = new Dictionary<int, List<bool>>();
+        var winsByDay = new Dictionary<int, List<bool>>();
+
+        for (int i = 1; i < samples.Count - 1; i++)
+        {
+            int first = samples[i - 1].Ticks;
+            int second = samples[i].Ticks;
+            int third = samples[i + 1].Ticks;
+
+            bool increasing = second > first;
+
+            if (first > 0 && second > 0 && (increasing))//backtest the win-rate of a particular number-pattern
+            {
+                bool isWin = third >= TPTicks;//minimum number of ticks for a win
+                int hour = samples[i + 1].HourOfDay;//win-rate by hour of day
+                int day = samples[i + 1].DayOfWeek;//win-rate by day of week
+
+                if (!winsByHour.ContainsKey(hour)) winsByHour[hour] = new List<bool>();
+                if (!winsByDay.ContainsKey(day)) winsByDay[day] = new List<bool>();
+
+                winsByHour[hour].Add(isWin);
+                winsByDay[day].Add(isWin);
+
+                totalPatterns++;
+                if (isWin) successfulPatterns++;
+            }
+        }
+
+        double winRate = totalPatterns > 0 ? (double)successfulPatterns * 100 / totalPatterns : 0;
+        double winRateSpike = 100.0 - winRate;
+        writer.WriteLine("=====================================================");
+        writer.WriteLine("Increasing-Pattern Win-Rate Analysis");
+        writer.WriteLine("=====================================================");
+        writer.WriteLine($"Total Patterns Found: {totalPatterns}");
+        writer.WriteLine($"Successful Patterns: {successfulPatterns}");
+        writer.WriteLine($"Win-Rate Calculator (Threshold = {TPTicks}) for Increasing-Patterns.");
+        writer.WriteLine("-------------------------------------------------------------------------------------------");
+        writer.WriteLine($"{winRate:F2}% of the time, completed ticks = {TPTicks} after 2 steps {(winRate > 70 ? "✅ Good-Scalping Opportunity" : "⚠️ Weak Pattern")}");
+        writer.WriteLine($"{winRateSpike:F2}% of the time, spike < {TPTicks} after 2 steps {(winRateSpike > 50 ? "✅ Good-Spiking Opportunity" : "⚠️ Low Spike-Strength")}");
+        writer.WriteLine("=====================================================");
+        writer.WriteLine();
+
+        writer.WriteLine("=====================================================");
+        writer.WriteLine("Win Rate by Hour");
+        writer.WriteLine("=====================================================");
+        foreach (var kvp in winsByHour.OrderBy(k => k.Key))
+        {
+            double rate = kvp.Value.Count(w => w) / (double)kvp.Value.Count;
+            writer.WriteLine($"Hour {kvp.Key:00}: {rate:P2}");
+        }
+        writer.WriteLine();
+
+        writer.WriteLine("=====================================================");
+        writer.WriteLine("Win Rate by Day");
+        writer.WriteLine("=====================================================");
+        string[] dayNames = { "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
+        foreach (var kvp in winsByDay.OrderBy(k => k.Key))
+        {
+            double rate = kvp.Value.Count(w => w) / (double)kvp.Value.Count;
+            string dayLabel = kvp.Key >= 0 && kvp.Key <= 6 ? dayNames[kvp.Key] : $"Day {kvp.Key}";
+            writer.WriteLine($"{dayLabel}: {rate:P2}");
+        }
+        writer.WriteLine();
+    }//IncreasingPatternWinRateCalculator
+    public static void TopThreeTickCountWinRatesInRange(List<MarketSample> samples, int TPTicks, int minTickCount, int maxTickCount, StreamWriter writer)
+    {
+        var totalPatterns = new Dictionary<int, int>();
+        var successfulPatterns = new Dictionary<int, int>();
+        var winByHour = new Dictionary<int, Dictionary<int, List<bool>>>();
+        var winByDay = new Dictionary<int, Dictionary<int, List<bool>>>();
+
+        for (int i = 1; i < samples.Count - 1; i++)
+        {
+            int first = samples[i - 1].Ticks;
+            int second = samples[i].Ticks;
+            int hour = samples[i].HourOfDay;
+            int day = samples[i].DayOfWeek;
+            bool isWin = second >= TPTicks;
+
+            if (first < minTickCount || first > maxTickCount) continue;
+
+            if (!totalPatterns.ContainsKey(first)) totalPatterns[first] = 0;
+            if (!successfulPatterns.ContainsKey(first)) successfulPatterns[first] = 0;
+
+            totalPatterns[first]++;
+            if (isWin) successfulPatterns[first]++;
+
+            if (!winByHour.ContainsKey(first)) winByHour[first] = new Dictionary<int, List<bool>>();
+            if (!winByHour[first].ContainsKey(hour)) winByHour[first][hour] = new List<bool>();
+            winByHour[first][hour].Add(isWin);
+
+            if (!winByDay.ContainsKey(first)) winByDay[first] = new Dictionary<int, List<bool>>();
+            if (!winByDay[first].ContainsKey(day)) winByDay[first][day] = new List<bool>();
+            winByDay[first][day].Add(isWin);
+        }
+
+        var winRates = new List<(int TickCount, double WinRate, int Total, int Success)>();
+        foreach (var tick in totalPatterns.Keys)
+        {
+            double rate = (double)successfulPatterns[tick] * 100 / totalPatterns[tick];
+            winRates.Add((tick, rate, totalPatterns[tick], successfulPatterns[tick]));
+        }
+
+        var top3 = winRates
+            .Where(x => x.Total >= 10)
+            .OrderByDescending(x => x.WinRate)
+            .Take(3)
+            .ToList();
+
+        string[] dayNames = { "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
+
+        for (int index = 0; index < top3.Count; index++)
+        {
+            var item = top3[index];
+            writer.WriteLine("=====================================================");
+            writer.WriteLine($"Top {index + 1} Tick-Count Pattern (TP-Ticks = {TPTicks})");
+            writer.WriteLine("=====================================================");
+            writer.WriteLine($"Tick-Count: {item.TickCount}");
+            writer.WriteLine($"Total Patterns: {item.Total}");
+            writer.WriteLine($"Successful Patterns: {item.Success}");
+            writer.WriteLine($"Win Rate: {item.WinRate:F2}%");
+            writer.WriteLine();
+
+            writer.WriteLine("Win Rate by Hour:");
+            foreach (var kvp in winByHour[item.TickCount].OrderBy(k => k.Key))
+            {
+                double rate = kvp.Value.Count(w => w) / (double)kvp.Value.Count;
+                writer.WriteLine($"Hour {kvp.Key:00}: {rate:P2}");
+            }
+
+            writer.WriteLine();
+
+            writer.WriteLine("Win Rate by Day:");
+            foreach (var kvp in winByDay[item.TickCount].OrderBy(k => k.Key))
+            {
+                double rate = kvp.Value.Count(w => w) / (double)kvp.Value.Count;
+                string dayLabel = kvp.Key >= 0 && kvp.Key <= 6 ? dayNames[kvp.Key] : $"Day {kvp.Key}";
+                writer.WriteLine($"{dayLabel}: {rate:P2}");
+            }
+
+            writer.WriteLine();
+        }
+    }//TopThreeTickCountWinRatesInRange
+    public static void ConditionalIncreasingPatternWinRateCalculator(List<MarketSample> samples, int MinTicks, int TPTicks, StreamWriter writer)
+    {
+        int totalPatterns = 0;
+        int successfulPatterns = 0;
+        var winsByHour = new Dictionary<int, List<bool>>();
+        var winsByDay = new Dictionary<int, List<bool>>();
+
+        for (int i = 1; i < samples.Count - 1; i++)
+        {
+            int first = samples[i - 1].Ticks;
+            int second = samples[i].Ticks;
+            int third = samples[i + 1].Ticks;
+
+            bool increasing = second > first;
+
+            if (first > MinTicks && second > MinTicks && (increasing))//backtest the win-rate of a particular number-pattern
+            {
+                bool isWin = third >= TPTicks;//minimum number of ticks for a win
+                int hour = samples[i + 1].HourOfDay;//win-rate by hour of day
+                int day = samples[i + 1].DayOfWeek;//win-rate by day of week
+
+                if (!winsByHour.ContainsKey(hour)) winsByHour[hour] = new List<bool>();
+                if (!winsByDay.ContainsKey(day)) winsByDay[day] = new List<bool>();
+
+                winsByHour[hour].Add(isWin);
+                winsByDay[day].Add(isWin);
+
+                totalPatterns++;
+                if (isWin) successfulPatterns++;
+            }
+        }
+
+        double winRate = totalPatterns > 0 ? (double)successfulPatterns * 100 / totalPatterns : 0;
+        double winRateSpike = 100.0 - winRate;
+        writer.WriteLine("=====================================================");
+        writer.WriteLine("Conditional-Increasing-Pattern Win-Rate Analysis");
+        writer.WriteLine("=====================================================");
+        writer.WriteLine($"Total Patterns Found: {totalPatterns}");
+        writer.WriteLine($"Successful Patterns: {successfulPatterns}");
+        writer.WriteLine($"Win-Rate Calculator (Threshold = {TPTicks}) for Conditional-Increasing-Patterns.");
+        writer.WriteLine("-------------------------------------------------------------------------------------------");
+        writer.WriteLine($"{winRate:F2}% of the time, completed ticks = {TPTicks} after 2 steps {(winRate > 70 ? "✅ Good-Scalping Opportunity" : "⚠️ Weak Pattern")}");
+        writer.WriteLine($"{winRateSpike:F2}% of the time, spike < {TPTicks} after 2 steps {(winRateSpike > 50 ? "✅ Good-Spiking Opportunity" : "⚠️ Low Spike-Strength")}");
+        writer.WriteLine("=====================================================");
+        writer.WriteLine();
+
+        writer.WriteLine("=====================================================");
+        writer.WriteLine("Win Rate by Hour");
+        writer.WriteLine("=====================================================");
+        foreach (var kvp in winsByHour.OrderBy(k => k.Key))
+        {
+            double rate = kvp.Value.Count(w => w) / (double)kvp.Value.Count;
+            writer.WriteLine($"Hour {kvp.Key:00}: {rate:P2}");
+        }
+        writer.WriteLine();
+
+        writer.WriteLine("=====================================================");
+        writer.WriteLine("Win Rate by Day");
+        writer.WriteLine("=====================================================");
+        string[] dayNames = { "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
+        foreach (var kvp in winsByDay.OrderBy(k => k.Key))
+        {
+            double rate = kvp.Value.Count(w => w) / (double)kvp.Value.Count;
+            string dayLabel = kvp.Key >= 0 && kvp.Key <= 6 ? dayNames[kvp.Key] : $"Day {kvp.Key}";
+            writer.WriteLine($"{dayLabel}: {rate:P2}");
+        }
+        writer.WriteLine();
+    }//ConditionalIncreasingPatternWinRateCalculator
+    public static void DecreasingPatternWinRateCalculator(List<MarketSample> samples, int TPTicks, StreamWriter writer)
+    {
+        int totalPatterns = 0;
+        int successfulPatterns = 0;
+        var winsByHour = new Dictionary<int, List<bool>>();
+        var winsByDay = new Dictionary<int, List<bool>>();
+
+        for (int i = 1; i < samples.Count - 1; i++)
+        {
+            int first = samples[i - 1].Ticks;
+            int second = samples[i].Ticks;
+            int third = samples[i + 1].Ticks;
+
+            bool decreasing = first > second;
+
+            if (first > 0 && second > 0 && (decreasing))//backtest the win-rate of a particular number-pattern
+            {
+                bool isWin = third >= TPTicks;//minimum number of ticks for a win
+                int hour = samples[i + 1].HourOfDay;//win-rate by hour of day
+                int day = samples[i + 1].DayOfWeek;//win-rate by day of week
+
+                if (!winsByHour.ContainsKey(hour)) winsByHour[hour] = new List<bool>();
+                if (!winsByDay.ContainsKey(day)) winsByDay[day] = new List<bool>();
+
+                winsByHour[hour].Add(isWin);
+                winsByDay[day].Add(isWin);
+
+                totalPatterns++;
+                if (isWin) successfulPatterns++;
+            }
+        }
+
+        double winRate = totalPatterns > 0 ? (double)successfulPatterns * 100 / totalPatterns : 0;
+        double winRateSpike = 100.0 - winRate;
+        writer.WriteLine("=====================================================");
+        writer.WriteLine("Decreasing-Pattern Win-Rate Analysis");
+        writer.WriteLine("=====================================================");
+        writer.WriteLine($"Total Patterns Found: {totalPatterns}");
+        writer.WriteLine($"Successful Patterns: {successfulPatterns}");
+        writer.WriteLine($"Win-Rate Calculator (Threshold = {TPTicks}) for Decreasing-Patterns.");
+        writer.WriteLine("-------------------------------------------------------------------------------------------");
+        writer.WriteLine($"{winRate:F2}% of the time, completed ticks = {TPTicks} after 2 steps {(winRate > 70 ? "✅ Good-Scalping Opportunity" : "⚠️ Weak Pattern")}");
+        writer.WriteLine($"{winRateSpike:F2}% of the time, spike < {TPTicks} after 2 steps {(winRateSpike > 50 ? "✅ Good-Spiking Opportunity" : "⚠️ Low Spike-Strength")}");
+        writer.WriteLine("=====================================================");
+        writer.WriteLine();
+
+        writer.WriteLine("=====================================================");
+        writer.WriteLine("Win Rate by Hour");
+        writer.WriteLine("=====================================================");
+        foreach (var kvp in winsByHour.OrderBy(k => k.Key))
+        {
+            double rate = kvp.Value.Count(w => w) / (double)kvp.Value.Count;
+            writer.WriteLine($"Hour {kvp.Key:00}: {rate:P2}");
+        }
+        writer.WriteLine();
+
+        writer.WriteLine("=====================================================");
+        writer.WriteLine("Win Rate by Day");
+        writer.WriteLine("=====================================================");
+        string[] dayNames = { "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
+        foreach (var kvp in winsByDay.OrderBy(k => k.Key))
+        {
+            double rate = kvp.Value.Count(w => w) / (double)kvp.Value.Count;
+            string dayLabel = kvp.Key >= 0 && kvp.Key <= 6 ? dayNames[kvp.Key] : $"Day {kvp.Key}";
+            writer.WriteLine($"{dayLabel}: {rate:P2}");
+        }
+        writer.WriteLine();
+    }//DecreasingPatternWinRateCalculator
+    public static void ConditionalDecreasingPatternWinRateCalculator(List<MarketSample> samples, int MinTicks, int TPTicks, StreamWriter writer)
+    {
+        int totalPatterns = 0;
+        int successfulPatterns = 0;
+        var winsByHour = new Dictionary<int, List<bool>>();
+        var winsByDay = new Dictionary<int, List<bool>>();
+
+        for (int i = 1; i < samples.Count - 1; i++)
+        {
+            int first = samples[i - 1].Ticks;
+            int second = samples[i].Ticks;
+            int third = samples[i + 1].Ticks;
+
+            bool decreasing = second < first;
+
+            if (first > MinTicks && second > MinTicks && (decreasing))//backtest the win-rate of a particular number-pattern
+            {
+                bool isWin = third >= TPTicks;//minimum number of ticks for a win
+                int hour = samples[i + 1].HourOfDay;//win-rate by hour of day
+                int day = samples[i + 1].DayOfWeek;//win-rate by day of week
+
+                if (!winsByHour.ContainsKey(hour)) winsByHour[hour] = new List<bool>();
+                if (!winsByDay.ContainsKey(day)) winsByDay[day] = new List<bool>();
+
+                winsByHour[hour].Add(isWin);
+                winsByDay[day].Add(isWin);
+
+                totalPatterns++;
+                if (isWin) successfulPatterns++;
+            }
+        }
+
+        double winRate = totalPatterns > 0 ? (double)successfulPatterns * 100 / totalPatterns : 0;
+        double winRateSpike = 100.0 - winRate;
+        writer.WriteLine("=====================================================");
+        writer.WriteLine("Conditional-Decreasing-Pattern Win-Rate Analysis");
+        writer.WriteLine("=====================================================");
+        writer.WriteLine($"Total Patterns Found: {totalPatterns}");
+        writer.WriteLine($"Successful Patterns: {successfulPatterns}");
+        writer.WriteLine($"Win-Rate Calculator (Threshold = {TPTicks}) for Conditional-Decreasing-Patterns.");
+        writer.WriteLine("-------------------------------------------------------------------------------------------");
+        writer.WriteLine($"{winRate:F2}% of the time, completed ticks = {TPTicks} after 2 steps {(winRate > 70 ? "✅ Good-Scalping Opportunity" : "⚠️ Weak Pattern")}");
+        writer.WriteLine($"{winRateSpike:F2}% of the time, spike < {TPTicks} after 2 steps {(winRateSpike > 50 ? "✅ Good-Spiking Opportunity" : "⚠️ Low Spike-Strength")}");
+        writer.WriteLine("=====================================================");
+        writer.WriteLine();
+
+        writer.WriteLine("=====================================================");
+        writer.WriteLine("Win Rate by Hour");
+        writer.WriteLine("=====================================================");
+        foreach (var kvp in winsByHour.OrderBy(k => k.Key))
+        {
+            double rate = kvp.Value.Count(w => w) / (double)kvp.Value.Count;
+            writer.WriteLine($"Hour {kvp.Key:00}: {rate:P2}");
+        }
+        writer.WriteLine();
+
+        writer.WriteLine("=====================================================");
+        writer.WriteLine("Win Rate by Day");
+        writer.WriteLine("=====================================================");
+        string[] dayNames = { "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
+        foreach (var kvp in winsByDay.OrderBy(k => k.Key))
+        {
+            double rate = kvp.Value.Count(w => w) / (double)kvp.Value.Count;
+            string dayLabel = kvp.Key >= 0 && kvp.Key <= 6 ? dayNames[kvp.Key] : $"Day {kvp.Key}";
+            writer.WriteLine($"{dayLabel}: {rate:P2}");
+        }
+        writer.WriteLine();
+    }//ConditionalDecreasingPatternWinRateCalculator
+    public static void CombinedPatternWinRateCalculator(List<MarketSample> samples, int TPTicks, StreamWriter writer)
+    {
+        int totalPatterns = 0;
+        int successfulPatterns = 0;
+        var winsByHour = new Dictionary<int, List<bool>>();
+        var winsByDay = new Dictionary<int, List<bool>>();
+
+        for (int i = 1; i < samples.Count - 1; i++)
+        {
+            int first = samples[i - 1].Ticks;
+            int second = samples[i].Ticks;
+            int third = samples[i + 1].Ticks;
+
+            bool increasing = second > first;
+            bool decreasing = first > second;
+
+            if (first > 0 && second > 0 && (increasing || decreasing))//backtest the win-rate of a particular number-pattern
+            {
+                bool isWin = third >= TPTicks;//minimum number of ticks for a win
+                int hour = samples[i + 1].HourOfDay;//win-rate by hour of day
+                int day = samples[i + 1].DayOfWeek;//win-rate by day of week
+
+                if (!winsByHour.ContainsKey(hour)) winsByHour[hour] = new List<bool>();
+                if (!winsByDay.ContainsKey(day)) winsByDay[day] = new List<bool>();
+
+                winsByHour[hour].Add(isWin);
+                winsByDay[day].Add(isWin);
+
+                totalPatterns++;
+                if (isWin) successfulPatterns++;
+            }
+        }
+
+        double winRate = totalPatterns > 0 ? (double)successfulPatterns * 100 / totalPatterns : 0;
+        double winRateSpike = 100.0 - winRate;
+        writer.WriteLine("=====================================================");
+        writer.WriteLine("Combined-Pattern Win-Rate Analysis");
+        writer.WriteLine("=====================================================");
+        writer.WriteLine($"Total Patterns Found: {totalPatterns}");
+        writer.WriteLine($"Successful Patterns: {successfulPatterns}");
+        writer.WriteLine($"Win-Rate Calculator (Threshold = {TPTicks}) for Combined-Patterns.");
+        writer.WriteLine("-------------------------------------------------------------------------------------------");
+        writer.WriteLine($"{winRate:F2}% of the time, completed ticks = {TPTicks} after 2 steps {(winRate > 70 ? "✅ Good-Scalping Opportunity" : "⚠️ Weak Pattern")}");
+        writer.WriteLine($"{winRateSpike:F2}% of the time, spike < {TPTicks} after 2 steps {(winRateSpike > 50 ? "✅ Good-Spiking Opportunity" : "⚠️ Low Spike-Strength")}");
+        writer.WriteLine("=====================================================");
+        writer.WriteLine();
+
+        writer.WriteLine("=====================================================");
+        writer.WriteLine("Win Rate by Hour");
+        writer.WriteLine("=====================================================");
+        foreach (var kvp in winsByHour.OrderBy(k => k.Key))
+        {
+            double rate = kvp.Value.Count(w => w) / (double)kvp.Value.Count;
+            writer.WriteLine($"Hour {kvp.Key:00}: {rate:P2}");
+        }
+        writer.WriteLine();
+
+        writer.WriteLine("=====================================================");
+        writer.WriteLine("Win Rate by Day");
+        writer.WriteLine("=====================================================");
+        string[] dayNames = { "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
+        foreach (var kvp in winsByDay.OrderBy(k => k.Key))
+        {
+            double rate = kvp.Value.Count(w => w) / (double)kvp.Value.Count;
+            string dayLabel = kvp.Key >= 0 && kvp.Key <= 6 ? dayNames[kvp.Key] : $"Day {kvp.Key}";
+            writer.WriteLine($"{dayLabel}: {rate:P2}");
+        }
+        writer.WriteLine();
+    }//CombinedPatternWinRateCalculator
+    public static void ConditionalCombinedPatternWinRateCalculator(List<MarketSample> samples, int MinTicks, int TPTicks, StreamWriter writer)
+    {
+        int totalPatterns = 0;
+        int successfulPatterns = 0;
+        var winsByHour = new Dictionary<int, List<bool>>();
+        var winsByDay = new Dictionary<int, List<bool>>();
+
+        for (int i = 1; i < samples.Count - 1; i++)
+        {
+            int first = samples[i - 1].Ticks;
+            int second = samples[i].Ticks;
+            int third = samples[i + 1].Ticks;
+
+            bool increasing = second > first;
+            bool decreasing = first > second;
+
+            if (first > MinTicks && second > MinTicks && (increasing || decreasing))//backtest the win-rate of a particular number-pattern
+            {
+                bool isWin = third >= TPTicks;//minimum number of ticks for a win
+                int hour = samples[i + 1].HourOfDay;//win-rate by hour of day
+                int day = samples[i + 1].DayOfWeek;//win-rate by day of week
+
+                if (!winsByHour.ContainsKey(hour)) winsByHour[hour] = new List<bool>();
+                if (!winsByDay.ContainsKey(day)) winsByDay[day] = new List<bool>();
+
+                winsByHour[hour].Add(isWin);
+                winsByDay[day].Add(isWin);
+
+                totalPatterns++;
+                if (isWin) successfulPatterns++;
+            }
+        }
+
+        double winRate = totalPatterns > 0 ? (double)successfulPatterns * 100 / totalPatterns : 0;
+        double winRateSpike = 100.0 - winRate;
+        writer.WriteLine("=====================================================");
+        writer.WriteLine("Conditional-Combined-Pattern Win-Rate Analysis");
+        writer.WriteLine("=====================================================");
+        writer.WriteLine($"Total Patterns Found: {totalPatterns}");
+        writer.WriteLine($"Successful Patterns: {successfulPatterns}");
+        writer.WriteLine($"Win-Rate Calculator (Threshold = {TPTicks}) for Conditional-Combined-Patterns.");
+        writer.WriteLine("-------------------------------------------------------------------------------------------");
+        writer.WriteLine($"{winRate:F2}% of the time, completed ticks = {TPTicks} after 2 steps {(winRate > 70 ? "✅ Good-Scalping Opportunity" : "⚠️ Weak Pattern")}");
+        writer.WriteLine($"{winRateSpike:F2}% of the time, spike < {TPTicks} after 2 steps {(winRateSpike > 50 ? "✅ Good-Spiking Opportunity" : "⚠️ Low Spike-Strength")}");
+        writer.WriteLine("=====================================================");
+        writer.WriteLine();
+
+        writer.WriteLine("=====================================================");
+        writer.WriteLine("Win Rate by Hour");
+        writer.WriteLine("=====================================================");
+        foreach (var kvp in winsByHour.OrderBy(k => k.Key))
+        {
+            double rate = kvp.Value.Count(w => w) / (double)kvp.Value.Count;
+            writer.WriteLine($"Hour {kvp.Key:00}: {rate:P2}");
+        }
+        writer.WriteLine();
+
+        writer.WriteLine("=====================================================");
+        writer.WriteLine("Win Rate by Day");
+        writer.WriteLine("=====================================================");
+        string[] dayNames = { "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
+        foreach (var kvp in winsByDay.OrderBy(k => k.Key))
+        {
+            double rate = kvp.Value.Count(w => w) / (double)kvp.Value.Count;
+            string dayLabel = kvp.Key >= 0 && kvp.Key <= 6 ? dayNames[kvp.Key] : $"Day {kvp.Key}";
+            writer.WriteLine($"{dayLabel}: {rate:P2}");
+        }
+        writer.WriteLine();
+    }//ConditionalCombinedPatternWinRateCalculator
+
+
+    public static void RawFrequencyDistribution(List<MarketSample> samples, StreamWriter writer)
+    {
+        // Group by Tick Count (Raw Frequency Distribution)
+        var freq = samples.GroupBy(s => s.Ticks).ToDictionary(g => g.Key, g => g.Count()).OrderBy(kv => kv.Key);
+
+        writer.WriteLine("=====================================================");
+        writer.WriteLine("Raw Frequency Distribution");
+        writer.WriteLine("=====================================================");
+
+        foreach (var kv in freq)
+        {
+            writer.WriteLine($"Tick-Count {kv.Key} → {kv.Value} times");
+        }
+        writer.WriteLine();
+
+    }//RawFrequencyDistribution
+
+    public static void Main(string[] args)
+    {
+        /*Steps to using this [Data]-Analysis Tool effectively******
+         
+         * 1.   Make sure the file-path to your CSV-File is correct.
+         * 2.   Make sure the outputpath for the report sheet is correct.
+         * 3.   Make sure you change the [Market]-Name and Report details.
+         * 4.   Try to play around with the parameters for other [Trading]-opportunities.
+         
+         */
+
+        string filePath = @"C:\Users\charl\Desktop\Crash600_Data.csv";
+        string outputPath = @"C:\Users\charl\Desktop\Crash-600 Report Sheet.txt";
+
+        List<MarketSample> samples = LoadData(filePath);
+        if (samples == null || samples.Count == 0)
+        {
+            Console.WriteLine("Failed to load data or no data found.\n");
+            return;
+        }
+
+        using (var writer = new StreamWriter(outputPath))
+        {
+            writer.WriteLine("CRASH-600 Analysis (OCTOBER 2024 - APRIL 2025)");
+            writer.WriteLine("========================================================");
+            writer.WriteLine();
+
+            // Frequency-Distribution
+            RawFrequencyDistribution(samples, writer);//frequency of each tick-count
+
+            // Win-Rate Analysis
+            TopThreeTickCountWinRatesInRange(samples, 2, 1, 34, writer);//Fixed (TPTicks, MinTickCount, MaxTickCount)
+            IncreasingPatternWinRateCalculator(samples, 2, writer);//Fixed (TPTicks)
+            DecreasingPatternWinRateCalculator(samples, 2, writer);//Fixed (TPTicks)
+            CombinedPatternWinRateCalculator(samples, 2, writer);//Combined (TPTicks)
+            ConditionalIncreasingPatternWinRateCalculator(samples, 1, 2, writer);//Conditional (MinTicks, TPTicks)
+            ConditionalDecreasingPatternWinRateCalculator(samples, 1, 2, writer);//Conditional (MinTicks, TPTicks)
+            ConditionalCombinedPatternWinRateCalculator(samples, 1, 2, writer);//Conditional (MinTicks, TPTicks)
+
+            writer.WriteLine("=====================================================");
+            writer.WriteLine("Analysis Complete.");
+            writer.WriteLine("=====================================================");
+        }
+
+        Console.WriteLine($"Analysis complete. Report saved to: {outputPath}");
+    }//Main
+}//MarketAnalyzer
